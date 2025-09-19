@@ -16,7 +16,7 @@ from libraries.central_logger import get_logger, create_class_logger
 
 # --- Information About Script ---
 __name__ = "DataUploader with Caching"
-__version__ = "5.2.3" 
+__version__ = "5.2.4" 
 __author__ = "TransformsAI"
 
 @dataclass
@@ -681,7 +681,7 @@ class DataUploader:
         sn: str, 
         timestamp: str,
         live_url: Optional[str] = None,
-        method: str = "PUT",
+        method: str = "POST", # PUT is required for old versions
         status_log: str = "Heartbeat received successfully."
         ) -> None:
         """Send heartbeat with device information"""
@@ -700,7 +700,7 @@ class DataUploader:
             heartbeat_data["version"] = self.project_version
         
         if live_url:
-            heartbeat_data["live_link"] = live_url
+            heartbeat_data["live_url"] = live_url
         
         self.send_data(
             data=heartbeat_data,
