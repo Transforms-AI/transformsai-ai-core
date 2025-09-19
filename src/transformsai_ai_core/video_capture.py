@@ -2,9 +2,9 @@ import threading
 import cv2
 import time
 import os
-from libraries.datasend import DataUploader 
-from libraries.utils import time_to_string 
-from libraries.central_logger import create_class_logger
+from .datasend import DataUploader 
+from .utils import time_to_string 
+from .central_logger import create_class_logger
 
 # --- Information About Script ---
 __name__ = "VideoCaptureAsync with Heartbeat"

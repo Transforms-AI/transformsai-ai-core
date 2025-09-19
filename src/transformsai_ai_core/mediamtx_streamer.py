@@ -8,7 +8,7 @@ import psutil
 import socket
 from threading import Lock
 from collections import deque
-from libraries.central_logger import create_class_logger
+from .central_logger import create_class_logger
 
 # --- Information About Script ---
 __name__ = "Streamer for MediaMTX Server"

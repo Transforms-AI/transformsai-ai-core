@@ -12,7 +12,7 @@ from functools import wraps
 from typing import Dict, List, Optional, Tuple, Callable
 from dataclasses import dataclass, field
 import urllib.parse
-from libraries.central_logger import get_logger, create_class_logger
+from .central_logger import get_logger, create_class_logger
 
 # --- Information About Script ---
 __name__ = "DataUploader with Caching"
