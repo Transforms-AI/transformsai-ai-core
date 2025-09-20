@@ -4,7 +4,7 @@ import time
 import os
 from .datasend import DataUploader 
 from .utils import time_to_string 
-from .central_logger import create_class_logger
+from .central_logger import get_logger
 
 # --- Information About Script ---
 __name__ = "VideoCaptureAsync with Heartbeat"
@@ -46,7 +46,7 @@ class VideoCaptureAsync:
         self._data_uploader = None
         self._last_heartbeat_time = 0
         
-        self.logger = create_class_logger(self)
+        self.logger = get_logger(self)
 
         if self._heartbeat_config.get('enabled', False):
             self._initialize_heartbeat()

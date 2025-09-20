@@ -12,7 +12,7 @@ from functools import wraps
 from typing import Dict, List, Optional, Tuple, Callable
 from dataclasses import dataclass, field
 import urllib.parse
-from .central_logger import get_logger, create_class_logger
+from .central_logger import get_logger
 
 # --- Information About Script ---
 __name__ = "DataUploader with Caching"
@@ -36,7 +36,7 @@ class NetworkUtils:
     """Utility class for network operations"""
     
     def __init__(self):
-        self.logger = create_class_logger(self)
+        self.logger = get_logger(self)
     
     @staticmethod
     def get_mac_address() -> str:
@@ -110,7 +110,7 @@ class CacheManager:
         self.failed_sends_cache: List[CacheItem] = []
         self.cache_lock = threading.RLock()
         
-        self.logger = create_class_logger(self)
+        self.logger = get_logger(self)
         
         self._ensure_cache_directory()
         self._load_cache()
@@ -330,7 +330,7 @@ class DataUploader:
                  source: str = "Frame Processor",
                  project_version: Optional[str] = None):
         
-        self.logger = create_class_logger(self)
+        self.logger = get_logger(self)
         
         # Core configuration
         self.base_url = base_url

@@ -8,7 +8,7 @@ import psutil
 import socket
 from threading import Lock
 from collections import deque
-from .central_logger import create_class_logger
+from .central_logger import get_logger
 
 # --- Information About Script ---
 __name__ = "Streamer for MediaMTX Server"
@@ -31,7 +31,7 @@ class MediaMTXStreamer:
         self.bitrate = bitrate
         
         # Setup logging using central logger
-        self.logger = create_class_logger(self)
+        self.logger = get_logger(self)
         
         # Build RTSP URL
         self.rtsp_url = f"rtsp://{self.mediamtx_ip}:{self.rtsp_port}/live/cam_sn_{self.camera_sn_id}"
