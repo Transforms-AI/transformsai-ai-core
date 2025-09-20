@@ -1,6 +1,6 @@
 # --- Information About Script ---
-__name__ = "Central Logger using Loguru"
-__version__ = "3.0.0"
+__name__ = "Central Logger (Powered by Loguru)"
+__version__ = "3.1.0"
 __author__ = "TransformsAI"
 
 import logging
@@ -18,7 +18,19 @@ Path("logs").mkdir(exist_ok=True)
 # Remove the default handler to prevent duplicate logs
 logger.remove()
 
+# Define a "patcher" function to modify the log record.
+# This function checks if a custom 'name' was bound using get_logger().
+# If so, it replaces the default module name with the custom one.
+def patch_record_with_bound_name(record: dict) -> None:
+    if record["extra"].get("name"):
+        record["name"] = record["extra"]["name"]
+
+# Configure the logger to use our patcher. This is the key to the solution.
+logger.configure(patcher=patch_record_with_bound_name)
+
+
 # Add a rich console logger for development
+# The format string now correctly displays the class name because the patcher has modified the record.
 logger.add(
     sys.stderr,
     level="INFO",
@@ -27,20 +39,20 @@ logger.add(
            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
            "<level>{message}</level>",
     colorize=True,
-    backtrace=True,  # Show full stack trace on exceptions
-    diagnose=False   # Don't add variable values to console logs for security
+    backtrace=True,
+    diagnose=False
 )
 
 # Add a file logger to capture all levels (from DEBUG upwards)
 logger.add(
     "logs/debug.log",
     level="DEBUG",
-    rotation="10 MB",   # Rotate the log file when it reaches 10 MB
-    retention="10 days",# Keep logs for 10 days
-    compression="zip",  # Compress old log files
+    rotation="10 MB",
+    retention="10 days",
+    compression="zip",
     format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
     backtrace=True,
-    diagnose=True,      # Add variable values to file logs for easier debugging
+    diagnose=True,
     encoding="utf8"
 )
 
@@ -52,36 +64,19 @@ logger.add(
     retention="30 days",
     compression="zip",
     format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
-    backtrace=True,     # Always include the full stack trace for errors
-    diagnose=True,      # This is the killer feature: log variable values on error
+    backtrace=True,
+    diagnose=True,
     encoding="utf8"
 )
 
-# --- (Optional) For structured logging with JSON ---
-# Comment out the file loggers above and uncomment this to write logs as JSON files.
-# This is ideal for log management systems like the ELK Stack, Datadog, or Splunk.
-# logger.add(
-#     "logs/app.json",
-#     level="DEBUG",
-#     rotation="10 MB",
-#     retention="10 days",
-#     compression="zip",
-#     serialize=True # This is the key to JSON output
-# )
-
 # --- 2. Intercept Standard Logging ---
-# This ensures that logs from third-party libraries that use Python's
-# standard `logging` module are captured and formatted by Loguru.
-
 class InterceptHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
-        # Get corresponding Loguru level if it exists
         try:
             level = logger.level(record.levelname).name
         except ValueError:
             level = record.levelno
 
-        # Find caller from where originated the logged message
         frame, depth = logging.currentframe(), 2
         while frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
@@ -89,10 +84,7 @@ class InterceptHandler(logging.Handler):
 
         logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
-# Configure the standard logging module to use our InterceptHandler
 logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
-
-# Set lower log levels for noisy third-party libraries
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -104,24 +96,19 @@ def get_logger(name: Union[str, object] = None, module_name: str = None) -> "log
     """
     Get the pre-configured Loguru logger instance.
 
-    This function maintains the original API for backward compatibility.
-    It can accept a string or a class instance to derive a name, but with
-    Loguru, this is often not necessary as the logger automatically
-    identifies the calling module.
+    This function can accept a string or a class instance to derive a name.
+    - If an object (like a class instance `self`) is passed, the logger name
+      will be the class's name (e.g., "DataUploader").
+    - If a string is passed, that string will be used as the name.
+    - If nothing is passed, Loguru's default behavior (module name) is used.
 
     Args:
         name: A string or an object (e.g., a class instance) to name the logger.
         module_name: Kept for compatibility, usually `__name__`.
 
     Returns:
-        The configured Loguru logger instance.
+        The configured Loguru logger instance, potentially with a bound name.
     """
-    # In Loguru, there is one primary logger object that is used everywhere.
-    # It automatically captures the correct module, function, and line number.
-    # This function simply returns that global logger. The name extraction
-    # is kept to demonstrate how one might add context if needed, but it's
-    # generally not required.
-    
     logger_name = name or module_name
     
     if logger_name and not isinstance(logger_name, str):
@@ -131,39 +118,30 @@ def get_logger(name: Union[str, object] = None, module_name: str = None) -> "log
 
     if isinstance(logger_name, str):
         # .bind() creates a logger with that context attached.
-        # This is useful if you want to filter logs based on this name later.
+        # Our patcher will then use this bound name for display.
         return logger.bind(name=logger_name)
 
     return logger
 
 
 # --- Example Usage ---
-# This block demonstrates how to use the logger.
-# You can run this file directly (`python logger_config.py`) to test it.
 if __name__ == "__main__":
+    # 1. Logger with a custom string name
+    string_log = get_logger(name="MyCustomTask")
+    string_log.info("This log record will be named 'MyCustomTask'.")
 
-    # Basic usage (same as before)
-    log = get_logger(module_name=__name__)
-    log.info("Logger configured successfully. This is an info message.")
-    log.debug("This debug message will only appear in 'logs/debug.log'.")
-    log.warning("This is a warning message.")
-
-    # Usage inside a class
+    # 2. Logger inside a class instance
     class MyService:
         def __init__(self):
             # Pass the instance `self` to get a logger named after the class
             self.logger = get_logger(name=self)
 
-        def do_work(self, user_id: int):
-            self.logger.info(f"Starting work for user {user_id}...")
-            try:
-                # Simulate a failure
-                result = 100 / 0
-            except ZeroDivisionError:
-                # Loguru automatically captures the exception details
-                self.logger.exception("A critical error occurred during processing.")
+        def do_work(self):
+            self.logger.info("This log record will be named 'MyService'.")
 
     service = MyService()
-    service.do_work(user_id=12345)
+    service.do_work()
 
-    log.success("Script finished. Check the 'logs' directory for output files.")
+    # 3. Logger with no name (falls back to module name)
+    default_log = get_logger()
+    default_log.warning("This log record will be named after the module (__main__).")
