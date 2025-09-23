@@ -8,7 +8,6 @@ from .central_logger import get_logger
 
 # --- Information About Script ---
 __name__ = "VideoCaptureAsync with Heartbeat"
-__version__ = "2.5.5" 
 __author__ = "TransformsAI"
 
 class VideoCaptureAsync:
@@ -19,14 +18,22 @@ class VideoCaptureAsync:
 
     VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}
 
-    def __init__(self, src=0, width=None, height=None, driver=None, loop=False,
-                 heartbeat_config=None, auto_restart_on_fail=False, restart_delay=30.0):
+    def __init__(
+        self, 
+        src=0, 
+        width=None, 
+        height=None, 
+        driver=None,
+        heartbeat_config=None, 
+        auto_restart_on_fail=False, 
+        restart_delay=30.0
+    ):
         self.src = src
         self.width = width # Currently does not resize frames, but can be used for future enhancements
         self.height = height # Same as width, for potential future resizing
         self.driver = driver
         self._is_file_source = self._check_if_file_source(src)
-        self.loop = loop if self._is_file_source else False
+        self.loop = True if self._is_file_source else False 
 
         self.auto_restart_on_fail = auto_restart_on_fail
         self.restart_delay = restart_delay
@@ -68,15 +75,16 @@ class VideoCaptureAsync:
 
     def _initialize_heartbeat(self):
         try:
-            heartbeat_url = self._heartbeat_config.get('heartbeat_url')
-            headers = self._heartbeat_config.get('headers', {})
+            base_url = self._heartbeat_config.get('base_url')
+            heartbeat_url = self._heartbeat_config.get('heartbeat_url') 
+            secret_keys = self._heartbeat_config.get('secret_keys', [])
             if heartbeat_url:
                 self._data_uploader = DataUploader(
-                    api_url=None, 
+                    base_url=base_url,
                     heartbeat_url=heartbeat_url, 
-                    headers=headers,
+                    secret_keys=secret_keys,
                     debug=True,
-                    max_workers=2,
+                    max_workers=1,
                     source="Video Capture"
                 )
                 self._last_heartbeat_time = 0
