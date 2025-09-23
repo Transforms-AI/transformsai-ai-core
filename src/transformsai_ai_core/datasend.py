@@ -9,7 +9,7 @@ import requests
 import random
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import Dict, List, Optional, Tuple, Callable, Union
 from dataclasses import dataclass, field
 import urllib.parse
 from .central_logger import get_logger
@@ -314,7 +314,7 @@ class DataUploader:
     def __init__(self, base_url: Optional[str] = None,
                  heartbeat_url: Optional[str] = None,
                  headers: Optional[Dict] = None,
-                 secret_keys: Optional[List[str]] = None,
+                 secret_keys: Optional[Union[str, List[str]]] = None,
                  secret_key_header: str = "X-Secret-Key",
                  max_workers: int = 5,
                  max_retries: int = 5,
@@ -336,7 +336,15 @@ class DataUploader:
         self.base_url = base_url
         self.heartbeat_url = heartbeat_url
         self.headers = headers or {}
-        self.secret_keys = secret_keys or []
+
+        # Process secret_keys to always be a list of strings
+        if isinstance(secret_keys, str):
+            self.secret_keys = [secret_keys]
+        elif isinstance(secret_keys, list):
+            self.secret_keys = secret_keys
+        else:
+            self.secret_keys = [] # Default to empty list if no input
+            
         self.secret_key_header = secret_key_header
         self.max_workers = max_workers
         self.max_retries = max_retries
@@ -505,6 +513,13 @@ class DataUploader:
                 break
             
             try:
+                if files:
+                    for file_tuple in files.values():
+                        if len(file_tuple) > 1:
+                            file_content = file_tuple[1]
+                            if hasattr(file_content, 'seek'):
+                                file_content.seek(0)
+
                 attempt_start = time.time()
                 response = self._make_http_request(url, method, headers, data_payload, files, single_request_timeout)
                 attempt_time = time.time() - attempt_start
