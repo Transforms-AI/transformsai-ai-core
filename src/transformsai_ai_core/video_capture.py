@@ -75,21 +75,12 @@ class VideoCaptureAsync:
 
     def _initialize_heartbeat(self):
         try:
-            base_url = self._heartbeat_config.get('base_url')
-            heartbeat_url = self._heartbeat_config.get('heartbeat_url') 
-            secret_keys = self._heartbeat_config.get('secret_keys', [])
-            if heartbeat_url:
-                self._data_uploader = DataUploader(
-                    base_url=base_url,
-                    heartbeat_url=heartbeat_url, 
-                    secret_keys=secret_keys,
-                    max_workers=1,
-                    source="Video Capture"
-                )
-                self._last_heartbeat_time = 0
-                self.logger.info(f"[{self.src}] Heartbeat functionality initialized.")
-            else:
-                self.logger.warning(f"[{self.src}] Heartbeat enabled but no heartbeat_url provided.")
+            uploader_config = self._heartbeat_config.get('uploader_config', {})
+            self._data_uploader = DataUploader(
+                **uploader_config
+            )
+            self._last_heartbeat_time = 0
+            self.logger.info(f"[{self.src}] Heartbeat functionality initialized.")
         except Exception as e:
             self.logger.error(f"[{self.src}] Failed to initialize heartbeat: {e}")
             self._data_uploader = None
