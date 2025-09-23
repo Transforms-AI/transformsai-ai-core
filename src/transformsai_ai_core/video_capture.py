@@ -83,7 +83,6 @@ class VideoCaptureAsync:
                     base_url=base_url,
                     heartbeat_url=heartbeat_url, 
                     secret_keys=secret_keys,
-                    debug=True,
                     max_workers=1,
                     source="Video Capture"
                 )
