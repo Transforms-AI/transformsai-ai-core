@@ -485,12 +485,6 @@ class DataUploader:
     def _make_http_request(self, url: str, method: str, headers: Dict, 
                           data: Optional[str], files: Optional[List], timeout: int) -> requests.Response: # files type hint
         """Make HTTP request using specified method"""
-        current_files = {}
-        if files:
-            for field_name, file_tuple in files.items():
-                if len(file_tuple) >= 2:
-                    current_files[field_name] = file_tuple
-        
         prepared_data = data
         if method == "GET" and data:
             # For GET requests, convert data to URL params
@@ -504,7 +498,7 @@ class DataUploader:
         # Method mapping for cleaner code
         method_map = {
             "GET": lambda: requests.get(url, headers=headers, timeout=timeout),
-            # Pass the `files` list directly
+            # Pass the `files` list directly - requests will handle it correctly
             "POST": lambda: requests.post(url, headers=headers, data=prepared_data, files=files, timeout=timeout),
             "PATCH": lambda: requests.patch(url, headers=headers, data=prepared_data, files=files, timeout=timeout),
             "PUT": lambda: requests.put(url, headers=headers, data=prepared_data, files=files, timeout=timeout),
@@ -516,9 +510,10 @@ class DataUploader:
         
         return method_map[method]()
     
-    def _send_data_core(self, data_payload: Optional[str], url: str, files: Optional[List], # files type hint
-                    identifier: str, is_heartbeat: bool, method: str, headers: Dict,
-                    cache_entry: Optional[CacheItem] = None, dont_cache: bool = False) -> Tuple[bool, List[str], Optional[str]]:
+    def _send_data_core(self, data_payload: Optional[str], url: str, files: Optional[List],
+                        identifier: str, is_heartbeat: bool, method: str, headers: Dict,
+                        cache_entry: Optional[CacheItem] = None, dont_cache: bool = False,
+                        original_files_dict: Optional[Dict] = None) -> Tuple[bool, List[str], Optional[str]]:
         """Core data sending logic with retry mechanism"""
         start_time = time.time()
         messages = []
@@ -535,7 +530,7 @@ class DataUploader:
             try:
                 # Reset seek on file-like objects in the list of tuples
                 if files:
-                    for _, file_tuple in files: # The first element is the field name
+                    for _, file_tuple in files:  # The first element is the field name
                         if len(file_tuple) > 1:
                             file_content = file_tuple[1]
                             if hasattr(file_content, 'seek'):
@@ -543,7 +538,6 @@ class DataUploader:
 
                 attempt_start = time.time()
                 response = self._make_http_request(url, method, headers, data_payload, files, single_request_timeout)
-                attempt_time = time.time() - attempt_start
                 
                 success_codes = [200, 201, 204, 202]
                 
@@ -560,18 +554,16 @@ class DataUploader:
                     
                     return True, messages, response.text
                 else:
-                    # Error logging: focus on failure details
                     error_msg = f"HTTP {response.status_code} for {identifier} (attempt {attempt + 1}/{self.max_retries + 1}) - {method} {endpoint}"
                     
                     # Add response details for debugging
                     if response.text:
                         error_details = response.text[:500] + "..." if len(response.text) > 500 else response.text
                         error_msg += f" | Response: {error_details}"
-                    
                     self.logger.error(error_msg)
                     messages.append(error_msg)
                     
-            except requests.exceptions.Timeout as e:
+            except requests.exceptions.Timeout:
                 error_msg = f"Timeout for {identifier} (attempt {attempt + 1}) - {method} {endpoint} after {single_request_timeout}s"
                 self.logger.error(error_msg)
                 messages.append(error_msg)
@@ -586,24 +578,24 @@ class DataUploader:
                 self.logger.error(error_msg)
                 messages.append(error_msg)
             
-            # Exponential backoff for retries
             if attempt < self.max_retries:
                 delay = self.retry_delay * (2 ** attempt)
                 delay = min(delay, 10)
                 self.logger.debug(f"Waiting {delay}s before retry {attempt + 2}")
                 time.sleep(delay)
-        
-        # All retries failed - add to cache if enabled and not explicitly disabled
+
+        # All retries failed. Cache if allowed.
         if not dont_cache and not is_heartbeat and self.cache_manager:
-            # NOTE: The original `files` dict is needed for caching. We need to trace it back.
-            # `_send_data_thread` gets `files_prepared`, but `add_to_cache` needs the original dict.
-            # For simplicity in this change, we will assume the calling function handles this.
-            # In a real scenario, we might need to pass the original `files` dict down.
-            # The current implementation will not cache files on failure due to this logic path.
-            # Let's fix this by passing the original `files` dict to `_send_data_core`.
-            # This is a larger change, so for "minimal change", we'll accept this limitation for now.
-            # A proper fix would involve refactoring the call chain.
-            msg = f"FAILED: {identifier} after {self.max_retries + 1} attempts. Caching of multi-files on failure is not fully supported in this version."
+            self.cache_manager.add_to_cache(
+                data_payload=data_payload,
+                url=url,
+                files_dict=original_files_dict, # Use the original dict for caching
+                identifier=identifier,
+                is_heartbeat=is_heartbeat,
+                method=method,
+                headers=headers
+            )
+            msg = f"FAILED: {identifier} after {self.max_retries + 1} attempts. Added to cache."
             self.logger.error(msg)
             messages.append(msg)
         else:
@@ -613,13 +605,21 @@ class DataUploader:
         
         return False, messages, None
     
-    def _send_data_thread(self, data_payload: Optional[str], url: str, files: Optional[List], # files type hint
-                         messages: List[str], identifier: str, is_heartbeat: bool, 
-                         method: str, headers: Dict, cache_entry: Optional[CacheItem] = None,
-                         files_opened_for_this_send: Optional[Dict] = None) -> List[str]:
+    def _send_data_thread(self, data_payload: Optional[str], url: str, files_prepared: Optional[List],
+                        messages: List[str], identifier: str, is_heartbeat: bool, 
+                        method: str, headers: Dict, cache_entry: Optional[CacheItem] = None,
+                        original_files_dict: Optional[Dict] = None) -> List[str]:
         """Thread wrapper for core sending logic"""
         success, core_messages, response_text = self._send_data_core(
-            data_payload, url, files, identifier, is_heartbeat, method, headers, cache_entry
+            data_payload=data_payload, 
+            url=url, 
+            files=files_prepared, 
+            identifier=identifier, 
+            is_heartbeat=is_heartbeat, 
+            method=method, 
+            headers=headers, 
+            cache_entry=cache_entry,
+            original_files_dict=original_files_dict
         )
         messages.extend(core_messages)
         return messages
@@ -630,26 +630,35 @@ class DataUploader:
             future.result()
         except Exception as e:
             self.logger.error(f"Thread error for {identifier}: {e}")
-    
+                
     def send_data(self, data: Optional[Dict] = None, heartbeat: bool = False, 
-                 files: Optional[Dict] = None, base_url: Optional[str] = None,
-                 method: str = "POST", content_type: str = "auto", 
-                 endpoint_path: str = "", url_params: Optional[Dict] = None) -> None:
-        """
-        Send data asynchronously with comprehensive HTTP method and content type support.
-        
+                files: Optional[Dict] = None, base_url: Optional[str] = None,
+                method: str = "POST", content_type: str = "auto", 
+                endpoint_path: str = "", url_params: Optional[Dict] = None) -> None:
+        """Sends data asynchronously in a background thread.
+
+        This method queues the data for sending and returns immediately. It is the
+        preferred method for non-blocking operations. If the request fails, it will
+        be automatically cached for a later retry (if caching is enabled).
+
         Args:
-            data: Data payload to send
-            heartbeat: Whether this is a heartbeat request
-            files: Files to upload.
-                   Format: {field: (filename, content, mimetype)}
-                   To send multiple files for the same field, provide a list of tuples:
-                   {field: [(filename1, content1, mimetype1), (filename2, ...)]}
-            base_url: Override base URL for this request
-            method: HTTP method (GET, POST, PATCH, PUT, DELETE)
-            content_type: Content type (json, form-data, auto)
-            endpoint_path: Path to append to base URL
-            url_params: URL parameters for GET requests
+            data: A dictionary of the data payload to send.
+            heartbeat: If True, marks this as a heartbeat request, which may use a
+                different URL and is not cached on failure.
+            files: A dictionary of files to upload. The format is:
+                {
+                    'field_name': ('filename.jpg', b'file_content', 'image/jpeg'),
+                    'multiple_files': [
+                        ('file1.txt', b'content1', 'text/plain'),
+                        ('file2.txt', b'content2', 'text/plain')
+                    ]
+                }
+            base_url: An optional URL to override the instance's default base_url.
+            method: The HTTP method to use (e.g., "POST", "GET", "PUT").
+            content_type: The content type ("json", "form-data"). Defaults to "auto",
+                which selects "json" if data is present, "form-data" if files are.
+            endpoint_path: The specific API path to append to the base URL.
+            url_params: A dictionary of query parameters to append to the URL.
         """
         messages = []
         base_id = "Heartbeat" if heartbeat else "DataUpload"
@@ -658,7 +667,6 @@ class DataUploader:
         try:
             # Determine URL
             if heartbeat and self.heartbeat_url:
-                
                 if "http" in self.heartbeat_url:
                     url_to_use = self.heartbeat_url
                 else:
@@ -677,8 +685,16 @@ class DataUploader:
             
             # Submit to thread pool
             future = self.executor.submit(
-                self._send_data_thread, data_payload, url_to_use, files_prepared,
-                messages, identifier, heartbeat, method.upper(), request_headers
+                self._send_data_thread, 
+                data_payload=data_payload, 
+                url=url_to_use, 
+                files_prepared=files_prepared,
+                messages=messages, 
+                identifier=identifier, 
+                is_heartbeat=heartbeat, 
+                method=method.upper(), 
+                headers=request_headers,
+                original_files_dict=files
             )
             future.add_done_callback(
                 lambda f: self._thread_done_callback(f, identifier, "async_send")
@@ -686,14 +702,32 @@ class DataUploader:
             
         except Exception as e:
             self.logger.error(f"Failed to submit {identifier}: {e}")
-    
+                
     def send_data_sync(self, data: Optional[Dict] = None, heartbeat: bool = False,
-                      files: Optional[Dict] = None, base_url: Optional[str] = None,
-                      method: str = "POST", content_type: str = "auto",
-                      endpoint_path: str = "", url_params: Optional[Dict] = None,
-                      dont_cache: bool = True) -> Optional[str]:
-        """
-        Synchronous version of send_data that returns the response immediately.
+                    files: Optional[Dict] = None, base_url: Optional[str] = None,
+                    method: str = "POST", content_type: str = "auto",
+                    endpoint_path: str = "", url_params: Optional[Dict] = None,
+                    dont_cache: bool = False) -> Optional[str]:
+        """Sends data synchronously and waits for a response.
+
+        This method blocks until the request (including any retries) is complete.
+        It is useful when you need to know the result of the upload immediately.
+
+        Args:
+            data: A dictionary of the data payload to send.
+            heartbeat: If True, marks this as a heartbeat request.
+            files: A dictionary of files to upload. See `send_data` for format.
+            base_url: An optional URL to override the instance's default base_url.
+            method: The HTTP method to use (e.g., "POST", "GET", "PUT").
+            content_type: The content type ("json", "form-data", or "auto").
+            endpoint_path: The specific API path to append to the base URL.
+            url_params: A dictionary of query parameters to append to the URL.
+            dont_cache: If True, this request will not be cached even if it fails
+                and caching is globally enabled.
+
+        Returns:
+            The text content of the server's response if the request was
+            successful, otherwise None.
         """
         base_id = "Heartbeat" if heartbeat else "DataUpload"
         identifier = f"{base_id}-{uuid.uuid4()}"
@@ -712,8 +746,15 @@ class DataUploader:
             
             # Send synchronously
             success, messages, response_text = self._send_data_core(
-                data_payload, url_to_use, files_prepared, identifier,
-                heartbeat, method.upper(), request_headers, dont_cache=dont_cache
+                data_payload=data_payload, 
+                url=url_to_use, 
+                files=files_prepared, 
+                identifier=identifier,
+                is_heartbeat=heartbeat, 
+                method=method.upper(), 
+                headers=request_headers, 
+                dont_cache=dont_cache,
+                original_files_dict=files
             )
             
             return response_text if success else None
