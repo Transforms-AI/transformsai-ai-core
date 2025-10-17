@@ -28,6 +28,25 @@ def patch_record_with_bound_name(record: dict) -> None:
 # Configure the logger to use our patcher. This is the key to the solution.
 logger.configure(patcher=patch_record_with_bound_name)
 
+# Create a custom sink that adds exception info for ERROR level logs
+def error_file_sink(message):
+    """Custom sink that forces exception trace for ERROR level logs"""
+    record = message.record
+    if record["level"].name == "ERROR" and record["exception"] is None:
+        # Force exception capture for ERROR level
+        try:
+            raise RuntimeError("Stack trace for ERROR log")
+        except RuntimeError:
+            import sys
+            exc_info = sys.exc_info()
+            # Re-log with exception info
+            logger.opt(depth=1, exception=exc_info).patch(
+                lambda r: r.update(record)
+            ).log(record["level"].name, record["message"])
+            return
+    # Write the message as-is
+    with open("logs/error.log", "a", encoding="utf8") as f:
+        f.write(message)
 
 # Add a rich console logger for development
 # The format string now correctly displays the class name because the patcher has modified the record.
@@ -63,7 +82,7 @@ logger.add(
     rotation="5 MB",
     retention="30 days",
     compression="zip",
-    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
+    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}\n{exception}",
     backtrace=True,
     diagnose=True,
     encoding="utf8"
@@ -119,9 +138,23 @@ def get_logger(name: Union[str, object] = None, module_name: str = None) -> "log
     if isinstance(logger_name, str):
         # .bind() creates a logger with that context attached.
         # Our patcher will then use this bound name for display.
-        return logger.bind(name=logger_name)
-
-    return logger
+        base_logger = logger.bind(name=logger_name)
+    else:
+        base_logger = logger
+    
+    # Create a wrapper that auto-adds exception trace for error calls
+    class LoggerWrapper:
+        def __init__(self, base):
+            self._logger = base
+        
+        def __getattr__(self, name):
+            attr = getattr(self._logger, name)
+            # Intercept error() calls to add exception trace
+            if name == "error":
+                return lambda msg, *args, **kwargs: self._logger.opt(exception=True).error(msg, *args, **kwargs)
+            return attr
+    
+    return LoggerWrapper(base_logger)
 
 
 # --- Example Usage ---
