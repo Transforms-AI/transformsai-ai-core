@@ -554,12 +554,27 @@ class DataUploader:
                     
                     return True, messages, response.text
                 else:
+                    # Build error message with better formatting
                     error_msg = f"HTTP {response.status_code} for {identifier} (attempt {attempt + 1}/{self.max_retries + 1}) - {method} {endpoint}"
                     
                     # Add response details for debugging
                     if response.text:
-                        error_details = response.text[:500] + "..." if len(response.text) > 500 else response.text
-                        error_msg += f" | Response: {error_details}"
+                        content_type = response.headers.get('Content-Type', '')
+                        
+                        # Handle HTML responses (likely error pages)
+                        if 'text/html' in content_type.lower():
+                            # Extract title if present
+                            import re
+                            title_match = re.search(r'<title>(.*?)</title>', response.text, re.IGNORECASE | re.DOTALL)
+                            title = title_match.group(1).strip() if title_match else "Unknown error"
+                            error_msg += f" | Error: {title}"
+                        else:
+                            # For JSON or plain text, show limited content
+                            response_preview = response.text[:200].replace('\n', ' ').replace('\r', '')
+                            if len(response.text) > 200:
+                                response_preview += "..."
+                            error_msg += f" | Response: {response_preview}"
+                    
                     self.logger.error(error_msg)
                     messages.append(error_msg)
                     
