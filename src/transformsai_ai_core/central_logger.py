@@ -1,6 +1,6 @@
 # --- Information About Script ---
 __name__ = "Central Logger (Powered by Loguru)"
-__version__ = "3.1.0"
+__version__ = "4.0.0"
 __author__ = "TransformsAI"
 
 import logging
@@ -12,44 +12,20 @@ from loguru import logger
 
 # --- 1. Centralized Configuration ---
 
-# Create logs directory if it doesn't exist
+# Create logs directory
 Path("logs").mkdir(exist_ok=True)
 
-# Remove the default handler to prevent duplicate logs
+# Remove default handler
 logger.remove()
 
-# Define a "patcher" function to modify the log record.
-# This function checks if a custom 'name' was bound using get_logger().
-# If so, it replaces the default module name with the custom one.
+# Patcher to use custom logger names
 def patch_record_with_bound_name(record: dict) -> None:
     if record["extra"].get("name"):
         record["name"] = record["extra"]["name"]
 
-# Configure the logger to use our patcher. This is the key to the solution.
 logger.configure(patcher=patch_record_with_bound_name)
 
-# Create a custom sink that adds exception info for ERROR level logs
-def error_file_sink(message):
-    """Custom sink that forces exception trace for ERROR level logs"""
-    record = message.record
-    if record["level"].name == "ERROR" and record["exception"] is None:
-        # Force exception capture for ERROR level
-        try:
-            raise RuntimeError("Stack trace for ERROR log")
-        except RuntimeError:
-            import sys
-            exc_info = sys.exc_info()
-            # Re-log with exception info
-            logger.opt(depth=1, exception=exc_info).patch(
-                lambda r: r.update(record)
-            ).log(record["level"].name, record["message"])
-            return
-    # Write the message as-is
-    with open("logs/error.log", "a", encoding="utf8") as f:
-        f.write(message)
-
-# Add a rich console logger for development
-# The format string now correctly displays the class name because the patcher has modified the record.
+# Console handler - INFO and above, traceback controlled by record extra
 logger.add(
     sys.stderr,
     level="INFO",
@@ -58,31 +34,27 @@ logger.add(
            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
            "<level>{message}</level>",
     colorize=True,
-    backtrace=True,
-    diagnose=False
+    backtrace=lambda record: record["extra"].get("show_console_traceback", False),
+    diagnose=lambda record: record["extra"].get("show_console_traceback", False)
 )
 
-# Add a file logger to capture all levels (from DEBUG upwards)
+# Debug file handler - all levels with traceback, date-based rotation
 logger.add(
-    "logs/debug.log",
+    "logs/debug_{time:YYYY-MM-DD}.log",
     level="DEBUG",
     rotation="10 MB",
-    retention="10 days",
-    compression="zip",
     format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
     backtrace=True,
     diagnose=True,
     encoding="utf8"
 )
 
-# Add a separate file logger specifically for errors
+# Error file handler - ERROR and above with full traceback, date-based rotation
 logger.add(
-    "logs/error.log",
+    "logs/error_{time:YYYY-MM-DD}.log",
     level="ERROR",
     rotation="5 MB",
-    retention="30 days",
-    compression="zip",
-    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}\n{exception}",
+    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
     backtrace=True,
     diagnose=True,
     encoding="utf8"
@@ -97,7 +69,7 @@ class InterceptHandler(logging.Handler):
             level = record.levelno
 
         frame, depth = logging.currentframe(), 2
-        while frame.f_code.co_filename == logging.__file__:
+        while frame and frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
             depth += 1
 
@@ -111,70 +83,53 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # --- 3. The Public API Function ---
 
-def get_logger(name: Union[str, object] = None, module_name: str = None) -> "logger":
+def get_logger(name: Union[str, object] = None, module_name: str = None):
     """
     Get the pre-configured Loguru logger instance.
-
-    This function can accept a string or a class instance to derive a name.
-    - If an object (like a class instance `self`) is passed, the logger name
-      will be the class's name (e.g., "DataUploader").
-    - If a string is passed, that string will be used as the name.
-    - If nothing is passed, Loguru's default behavior (module name) is used.
 
     Args:
         name: A string or an object (e.g., a class instance) to name the logger.
         module_name: Kept for compatibility, usually `__name__`.
 
     Returns:
-        The configured Loguru logger instance, potentially with a bound name.
+        A logger wrapper with error() and exception() methods.
     """
     logger_name = name or module_name
     
     if logger_name and not isinstance(logger_name, str):
-        # If an object (like a class instance) is passed, get its class name
         if hasattr(logger_name, '__class__'):
             logger_name = logger_name.__class__.__name__
 
-    if isinstance(logger_name, str):
-        # .bind() creates a logger with that context attached.
-        # Our patcher will then use this bound name for display.
-        base_logger = logger.bind(name=logger_name)
-    else:
-        base_logger = logger
+    base_logger = logger.bind(name=logger_name) if isinstance(logger_name, str) else logger
     
-    # Create a wrapper that auto-adds exception trace for error calls
     class LoggerWrapper:
         def __init__(self, base):
             self._logger = base
         
+        def error(self, msg, *args, traceback: bool = True, **kwargs):
+            """
+            Log an error message.
+            
+            Args:
+                msg: The message to log.
+                traceback: If True (default), includes full traceback in file but not stdout.
+                           If False, logs message only.
+            """
+            if traceback:
+                # Add traceback to files only (console has backtrace conditional)
+                self._logger.opt(exception=True).error(msg, *args, **kwargs)
+            else:
+                self._logger.error(msg, *args, **kwargs)
+        
+        def exception(self, msg, *args, **kwargs):
+            """
+            Log an exception with full traceback to both file and stdout.
+            Always captures exception context.
+            """
+            # Use bind to mark this as needing console traceback
+            self._logger.bind(show_console_traceback=True).opt(exception=True, depth=1).error(msg, *args, **kwargs)
+        
         def __getattr__(self, name):
-            attr = getattr(self._logger, name)
-            # Intercept error() calls to add exception trace
-            if name == "error":
-                return lambda msg, *args, **kwargs: self._logger.opt(exception=True).error(msg, *args, **kwargs)
-            return attr
+            return getattr(self._logger, name)
     
     return LoggerWrapper(base_logger)
-
-
-# --- Example Usage ---
-if __name__ == "__main__":
-    # 1. Logger with a custom string name
-    string_log = get_logger(name="MyCustomTask")
-    string_log.info("This log record will be named 'MyCustomTask'.")
-
-    # 2. Logger inside a class instance
-    class MyService:
-        def __init__(self):
-            # Pass the instance `self` to get a logger named after the class
-            self.logger = get_logger(name=self)
-
-        def do_work(self):
-            self.logger.info("This log record will be named 'MyService'.")
-
-    service = MyService()
-    service.do_work()
-
-    # 3. Logger with no name (falls back to module name)
-    default_log = get_logger()
-    default_log.warning("This log record will be named after the module (__main__).")
