@@ -27,19 +27,22 @@ pip install git+https://github.com/yourusername/transformsai-ai-core.git
 Set up consistent logging across your entire application with a single function call.
 
 ```python
-from transformsai_ai_core import get_logger
+from transformsai_ai_core.central_logger import get_logger
 
-# Get a logger for the current module
-logger = get_logger(module_name=__name__)
+# Get a logger for custom named module
+logger = get_logger(module_name="CustomScript")
 
 logger.info("This is an informational message.")
 logger.warning("This is a warning.")
 logger.error("This is an error with automatic traceback logging.")
+logger.error("This is an error with automatic traceback logging turned off.", traceback = False)
+logger.exception("This is an standard extension, will always have traceback.")
+
 
 class MyWorker:
     def __init__(self):
         # It's easy to create named loggers for classes
-        self.logger = get_logger(name=self.__class__.__name__)
+        self.logger = get_logger(self)
     
     def do_work(self):
         self.logger.debug("Doing some work...")
