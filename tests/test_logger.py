@@ -2,7 +2,7 @@
 """Comprehensive test script for the central logger."""
 
 import logging
-from src.transformsai_ai_core.central_logger import get_logger
+from transformsai_ai_core.central_logger import get_logger
 
 
 def print_test_header(test_num: int, description: str):

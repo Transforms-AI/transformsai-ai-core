@@ -76,10 +76,14 @@ class InterceptHandler(logging.Handler):
         logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+
+# Set specific log levels for noisy libraries
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
-
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("gradio").setLevel(logging.INFO)
+logging.getLogger("qdrant_client").setLevel(logging.INFO)
 
 # --- 3. The Public API Function ---
 
