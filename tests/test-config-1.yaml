@@ -1,0 +1,119 @@
+# ******************************************************************************
+# Structured YAML Configuration File - Sentiment Face Capture
+# ******************************************************************************
+
+# ==============================================================================
+# Project Information (Formatted, read-only except token)
+# ==============================================================================
+meta:
+  name: "sentiment"
+  version: "1.0.0"
+  token: ""
+
+# ==============================================================================
+# Cameras (Formatted, fully editable)
+# ==============================================================================
+cameras:
+  - local: true
+    local_source: "demo/sentiment-test.mp4"
+    rtsp_source:
+      username: "admin"
+      password: "j40a@234"
+      ip: "192.168.8.201"
+      port: 554
+      path: "/Streaming/Channels/101"
+    settings:
+      resolution:
+        width: 1280
+        height: 720
+
+  - local: true
+    local_source: "demo/sentiment-test.mp4"
+    rtsp_source:
+      username: "admin"
+      password: "j40a@234"
+      ip: "192.168.8.201"
+      port: 554
+      path: "/Streaming/Channels/101"
+    settings:
+      resolution:
+        width: 1280
+        height: 720
+
+  - local: true
+    local_source: "demo/sentiment-test.mp4"
+    rtsp_source:
+      username: "admin"
+      password: "j40a@234"
+      ip: "192.168.8.201"
+      port: 554
+      path: "/Streaming/Channels/101"
+    settings:
+      resolution:
+        width: 1280
+        height: 720
+
+# ==============================================================================
+# Advanced Settings (Password protected)
+# ==============================================================================
+advanced:
+  # ----------------------------------------------------------------------------
+  # Models (Formatted)
+  # ----------------------------------------------------------------------------
+  models:
+    - name: "yolov11s-face"
+      type: "YOLO"
+      task: "detect"
+      path: ""
+      batch: 1
+      backend: "engine"
+      export_options:
+        img_size: 640
+        dynamic: true
+        half: true
+
+  # ----------------------------------------------------------------------------
+  # Timings (Freeform)
+  # ----------------------------------------------------------------------------
+  timings:
+    inference_interval: 0.033
+    datasend_interval: 120
+    heartbeat_interval: 30
+
+  # ----------------------------------------------------------------------------
+  # Data Sending (Semi-formatted)
+  # ----------------------------------------------------------------------------
+  datasend:
+    enabled: true
+    base_url: "https://tamayuzdrf.transformsai.com/api/v1/"
+    endpoints:
+      sentiment: "cameras/create-sentiment-analysis/"
+      heartbeat: "cameras/create-camera-heartbeat/"
+    secret_keys:
+      - "y4ETFj0CCY2V1SX"
+      - "1Rw9JhMLF0RI8G5"
+      - "7OD3YR2P1vGiWd5"
+      - "JHW0hufjt6W38aW"
+      - "HMa4E3PQG7b0VmV"
+    settings:
+      width: 1280
+      jpeg_quality: 60
+
+  # ----------------------------------------------------------------------------
+  # Livestream (Semi-formatted)
+  # ----------------------------------------------------------------------------
+  livestream:
+    enabled: true
+    mediamtx_ip: "localhost"
+    rtsp_port: 8554
+    settings:
+      fps: 30
+      draw_annotations: true
+      resolution:
+        width: 1280
+        height: 720
+
+  # ----------------------------------------------------------------------------
+  # Pipeline (Freeform, project-specific)
+  # ----------------------------------------------------------------------------
+  pipeline: {}

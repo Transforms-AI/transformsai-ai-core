@@ -12,16 +12,53 @@ from .datasend import DataUploader
 from .mediamtx_streamer import MediaMTXStreamer
 from .video_capture import VideoCaptureAsync
 from .utils import time_to_string, mat_to_response
-# from .stream_publisher import StreamPublisher
-# from .stream_receiver import StreamReceiver
+
+# Config management
+from .config_schema import (
+    AppConfig,
+    MetaConfig,
+    CameraConfig,
+    RtspSource,
+    ModelConfig,
+    DatasendConfig,
+    LivestreamConfig,
+    AdvancedConfig,
+)
+from .config_loader import (
+    load_config,
+    save_config,
+    process_config,
+    build_rtsp_url,
+    resolve_model_paths,
+    download_model,
+    get_formatted_fields,
+    get_freeform_fields,
+)
 
 __all__ = [
+    # Existing
     'get_logger',
     'DataUploader', 
     'MediaMTXStreamer',
     'VideoCaptureAsync',
     'time_to_string',
     'mat_to_response',
-    # 'StreamPublisher',
-    # 'StreamReceiver'
+    # Config schema
+    'AppConfig',
+    'MetaConfig',
+    'CameraConfig',
+    'RtspSource',
+    'ModelConfig',
+    'DatasendConfig',
+    'LivestreamConfig',
+    'AdvancedConfig',
+    # Config loader
+    'load_config',
+    'save_config',
+    'process_config',
+    'build_rtsp_url',
+    'resolve_model_paths',
+    'download_model',
+    'get_formatted_fields',
+    'get_freeform_fields',
 ]

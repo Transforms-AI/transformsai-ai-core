@@ -17,6 +17,7 @@ pip install git+https://github.com/yourusername/transformsai-ai-core.git
 *   **`MediaMTXStreamer`**: Pushes video frames to a MediaMTX RTSP server using FFmpeg, with detailed performance monitoring.
 *   **`DataUploader`**: Asynchronous, thread-safe HTTP client with a persistent cache, automatic retries, and heartbeat functionality.
 *   **`central_logger`**: A centralized, singleton logger that provides colored console output and rotating file logs out of the box.
+*   **`config_loader`**: Centralized configuration management with structured schemas and dynamic freeform fields for project-specific settings.
 
 ---
 
@@ -49,7 +50,117 @@ class MyWorker:
 
 ```
 
-### 2. Asynchronous Video Capture
+### 2. Configuration Management
+
+Manage project configurations with structured validation and dynamic freeform fields. Perfect for admin panels that need to control camera settings, models, and project-specific parameters.
+
+```python
+from transformsai_ai_core.config_loader import (
+    load_config, save_config, process_config, build_rtsp_url
+)
+from transformsai_ai_core.config_schema import AppConfig
+
+# Load and validate config
+config = load_config("config.yaml", validate=True)
+
+# Access structured fields
+project_name = config["meta"]["name"]
+camera_count = len(config["cameras"])
+models = config["advanced"]["models"]
+
+# Edit structured fields (strict schema)
+config["meta"]["token"] = "hw-token-12345"
+config["cameras"][0]["local"] = False
+config["cameras"][0]["rtsp_source"]["ip"] = "192.168.1.100"
+config["advanced"]["datasend"]["enabled"] = True
+
+# Edit freeform fields (arbitrary key-value pairs)
+config["cameras"][0]["settings"]["resolution"] = {"width": 1920, "height": 1080}
+config["advanced"]["timings"]["inference_interval"] = 0.033
+config["advanced"]["pipeline"]["custom_threshold"] = 0.85
+
+# Build RTSP URL from components (useful for admin panels)
+rtsp_url = build_rtsp_url({
+    "username": "admin",
+    "password": "pass@123",
+    "ip": "192.168.1.100",
+    "port": 554,
+    "path": "/stream"
+})
+# Result: rtsp://admin:pass%40123@192.168.1.100:554/stream
+
+# Validate changes
+validated = AppConfig(**config)
+
+# Save modified config
+save_config("config.yaml", config)
+
+# Process config for runtime (builds RTSP URLs, resolves model paths)
+runtime_config = process_config(
+    "config.yaml",
+    resolve_models=True,
+    download_models=False
+)
+
+# Access built RTSP URL
+if not runtime_config["cameras"][0]["local"]:
+    rtsp_url = runtime_config["cameras"][0]["rtsp_url"]
+    print(f"Camera stream: {rtsp_url}")
+```
+
+**Config Structure Example:**
+
+```yaml
+meta:
+  name: "people-count"
+  version: "1.0.0"
+  token: ""
+
+cameras:
+  - local: false
+    rtsp_source:
+      username: "admin"
+      password: "pass123"
+      ip: "192.168.1.100"
+      port: 554
+      path: "/stream"
+    settings:  # Freeform: add any key-value pairs
+      resolution:
+        width: 1920
+        height: 1080
+      custom_param: "value"
+
+advanced:
+  models:
+    - name: "yolov11s"
+      type: "YOLO"
+      task: "detect"
+      batch: 1
+      export_options:  # Freeform: model-specific options
+        img_size: 640
+        half: true
+  
+  timings:  # Freeform: project-specific timings
+    inference_interval: 0.033
+    datasend_interval: 120
+  
+  datasend:
+    enabled: true
+    base_url: "https://api.example.com"
+    endpoints:  # Freeform: define your endpoints
+      analytics: "cameras/analytics/"
+      heartbeat: "cameras/heartbeat/"
+  
+  pipeline:  # Freeform: project-specific settings
+    tracking_threshold: 0.5
+    counting_lines:
+      x1: 0.0
+      y1: 0.5
+      x2: 1.0
+      y2: 0.5
+```
+
+### 3. Asynchronous Video Capture
 
 Reliably capture frames from a camera, RTSP stream, or video file in a background thread. The `auto_restart_on_fail` feature makes it resilient to network drops.
 
@@ -87,7 +198,7 @@ cap.release()
 cv2.destroyAllWindows()
 ```
 
-### 3. Streaming to MediaMTX
+### 4. Streaming to MediaMTX
 
 Push processed frames to a MediaMTX (or other RTSP) server.
 
@@ -120,7 +231,7 @@ if streamer.start_streaming():
 # streamer.stop_streaming()
 ```
 
-### 4. Uploading Data with Caching
+### 5. Uploading Data with Caching
 
 Send data (like analytics or alerts) to a server. If the network is down, `DataUploader` automatically caches the data to disk and retries later.
 

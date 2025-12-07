@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transformsai-ai-core"
-version = "1.5.1"
+version = "1.6.0"
 description = "TransformsAI Core Library - Utilities for AI vision applications"
 readme = "README.md"
 authors = [
@@ -39,6 +39,7 @@ dependencies = [
     "python-dateutil>=2.8.0",
     "pytz>=2021.1",
     "loguru>=0.7.3",
+    "pydantic>=2.12.5",
 ]
 
 # [project.urls]

@@ -1,0 +1,123 @@
+# ******************************************************************************
+# Structured YAML Configuration File - People Count
+# ******************************************************************************
+
+# ==============================================================================
+# Project Information (Formatted, read-only except token)
+# ==============================================================================
+meta:
+  name: "people-count"
+  version: "1.0.0"
+  token: "" # HW token generated on first admin run
+
+# ==============================================================================
+# Cameras (Formatted, fully editable)
+# ==============================================================================
+cameras:
+  - local: true
+    local_source: "demo/people-count-indoor.mp4"
+    rtsp_source:
+      username: "admin"
+      password: "El1710@96"
+      ip: "192.168.7.7"
+      port: 554
+      path: "/Streaming/Channels/2501"
+    settings:
+      resolution:
+        width: 1280
+        height: 720
+
+# ==============================================================================
+# Advanced Settings (Password protected)
+# ==============================================================================
+advanced:
+  # ----------------------------------------------------------------------------
+  # Models (Formatted)
+  # ----------------------------------------------------------------------------
+  models:
+    - name: "person-11n-21april"
+      type: "YOLO"
+      task: "detect"
+      path: ""
+      batch: 1
+      backend: "engine"
+      export_options:
+        img_size: 640
+        dynamic: true
+        half: true
+    - name: "gender-classifier-20june"
+      type: "YOLO"
+      task: "classify"
+      path: ""
+      batch: 1
+      backend: "engine"
+      export_options:
+        img_size: 640
+        dynamic: true
+        half: true
+
+  # ----------------------------------------------------------------------------
+  # Timings (Freeform)
+  # ----------------------------------------------------------------------------
+  timings:
+    datasend_interval: 5
+    heartbeat_interval: 10
+
+  # ----------------------------------------------------------------------------
+  # Data Sending (Semi-formatted)
+  # ----------------------------------------------------------------------------
+  datasend:
+    enabled: true
+    base_url: "https://tamayuzdrf.transformsai.com/api/v1/"
+    endpoints:
+      people_count: "cameras/create-counter-history/"
+      gender_count: "camera/create-gender-counter/"
+      group_count: "camera/create-group-counter/"
+      heartbeat: "cameras/create-camera-heartbeat/"
+    secret_keys:
+      - "y4ETFj0CCY2V1SX"
+      - "1Rw9JhMLF0RI8G5"
+      - "7OD3YR2P1vGiWd5"
+      - "JHW0hufjt6W38aW"
+      - "HMa4E3PQG7b0VmV"
+    settings:
+      jpeg_quality: 70
+
+  # ----------------------------------------------------------------------------
+  # Livestream (Semi-formatted)
+  # ----------------------------------------------------------------------------
+  livestream:
+    enabled: true
+    mediamtx_ip: "localhost"
+    rtsp_port: 8554
+    settings:
+      fps: 30
+
+  # ----------------------------------------------------------------------------
+  # Pipeline (Freeform, project-specific)
+  # ----------------------------------------------------------------------------
+  pipeline:
+    use_shared_memory: false
+    local_ip: "127.0.0.2"
+    count_gender: false
+    gender_sn: "gender-1"
+    count_group: false
+    group_sn: "group-1"
+    group_threshold_distance: 150
+    is_camera_rotated: true
+    debug: true
+    show_window: false
+    tracking_zone:
+      rx1: 0.0
+      ry1: 0.0
+      rx2: 1.0
+      ry2: 0.99
+    counting_lines:
+      l1x1: 0.0
+      l1y1: 0.46
+      l1x2: 0.26
+      l1y2: 0.5
+      l2x1: 0.75
+      l2y1: 0.44
+      l2x2: 1.0
+      l2y2: 0.29
