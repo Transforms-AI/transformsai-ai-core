@@ -65,13 +65,13 @@ assert validated.cameras[0].rtsp_source.port == 8554
 print("✓ Camera structured fields edited successfully")
 
 print_test_header(5, "Edit Model Structured Fields")
-config2["advanced"]["models"][0]["batch"] = 4
-config2["advanced"]["models"][0]["backend"] = "onnx"
-config2["advanced"]["models"][1]["task"] = "classify"
+config2["advanced"]["models"]["person-det"]["batch"] = 4
+config2["advanced"]["models"]["person-det"]["export_options"]["backend"] = "onnx"
+config2["advanced"]["models"]["gender-cls"]["load_options"]["task"] = "classify"
 validated = AppConfig(**config2)
-assert validated.advanced.models[0].batch == 4
-assert validated.advanced.models[0].backend == "onnx"
-assert validated.advanced.models[1].task == "classify"
+assert validated.advanced.models["person-det"].batch == 4
+assert validated.advanced.models["person-det"].export_options["backend"] == "onnx"
+assert validated.advanced.models["gender-cls"].load_options.task == "classify"
 print("✓ Model structured fields edited successfully")
 
 print_test_header(6, "Edit Datasend Structured Fields")
@@ -110,13 +110,13 @@ assert validated.cameras[0].settings["custom"]["nested"]["deep"] == "value"
 print("✓ Camera freeform settings edited successfully")
 
 print_test_header(9, "Edit Model Export Options (Freeform)")
-config2["advanced"]["models"][0]["export_options"]["new_flag"] = True
-config2["advanced"]["models"][0]["export_options"]["img_size"] = 1280
-config2["advanced"]["models"][0]["export_options"]["custom_dict"] = {"a": 1, "b": 2}
+config2["advanced"]["models"]["person-det"]["export_options"]["new_flag"] = True
+config2["advanced"]["models"]["person-det"]["export_options"]["img_size"] = 1280
+config2["advanced"]["models"]["person-det"]["export_options"]["custom_dict"] = {"a": 1, "b": 2}
 validated = AppConfig(**config2)
-assert validated.advanced.models[0].export_options["new_flag"] == True
-assert validated.advanced.models[0].export_options["img_size"] == 1280
-assert validated.advanced.models[0].export_options["custom_dict"]["b"] == 2
+assert validated.advanced.models["person-det"].export_options["new_flag"] == True
+assert validated.advanced.models["person-det"].export_options["img_size"] == 1280
+assert validated.advanced.models["person-det"].export_options["custom_dict"]["b"] == 2
 print("✓ Model export_options edited successfully")
 
 print_test_header(10, "Edit Timings (Freeform)")
@@ -170,15 +170,6 @@ print_test_header(14, "Invalid Type for Structured Field")
 try:
     invalid_config = config1.copy()
     invalid_config["meta"]["name"] = 123  # Should be string
-    AppConfig(**invalid_config)
-    assert False, "Should have raised ValidationError"
-except ValidationError as e:
-    print(f"✓ Validation error caught: {e.error_count()} error(s)")
-
-print_test_header(15, "Invalid Model Task")
-try:
-    invalid_config = config2.copy()
-    invalid_config["advanced"]["models"][0]["task"] = "invalid_task"
     AppConfig(**invalid_config)
     assert False, "Should have raised ValidationError"
 except ValidationError as e:

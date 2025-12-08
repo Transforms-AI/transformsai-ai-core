@@ -66,7 +66,7 @@ config = load_config("config.yaml", validate=True)
 # Access structured fields
 project_name = config["meta"]["name"]
 camera_count = len(config["cameras"])
-models = config["advanced"]["models"]
+models = config["advanced"]["models"]  # Now a dict keyed by model name
 
 # Edit structured fields (strict schema)
 config["meta"]["token"] = "hw-token-12345"
@@ -132,11 +132,16 @@ cameras:
 
 advanced:
   models:
-    - name: "yolov11s"
-      type: "YOLO"
-      task: "detect"
+    yolov11s:  # Model key/identifier
+      download_key: ""  # Optional: direct download key
+      type: "person-det"  # Model type/category
       batch: 1
+      path: ""  # Auto-populated after download
+      load_options:  # Formatted: loading parameters
+        lib_type: "YOLO"
+        task: "detect"
       export_options:  # Freeform: model-specific options
+        backend: "engine"
         img_size: 640
         half: true
   

@@ -45,15 +45,21 @@ class CameraConfig(BaseModel):
 # ==============================================================================
 # Model Configuration
 # ==============================================================================
+class LoadOptions(BaseModel):
+    """Model loading parameters."""
+
+    lib_type: str = Field(default="YOLO", description="Model library type (YOLO, YOLOE, etc.)")
+    task: str = Field(default="detect", description="Model task type (detect, classify, segment)")
+
+
 class ModelConfig(BaseModel):
     """AI model definition for Ultralytics wrapper."""
 
-    name: str = Field(..., description="Model identifier for download/lookup")
-    type: Literal["YOLO", "YOLOE"] = Field(default="YOLO", description="Ultralytics model class")
-    task: Literal["detect", "classify", "segment"] = Field(default="detect", description="Model task type")
-    path: str = Field(default="", description="Local path, auto-populated after download")
+    download_key: str = Field(default="", description="Direct download key from server")
+    type: str = Field(..., description="Model type/category (e.g., face-det, person-det)")
     batch: int = Field(default=1, description="Batch size for inference")
-    backend: str = Field(default="engine", description="Export backend (engine/onnx/...)")
+    path: str = Field(default="", description="Local path, auto-populated after download")
+    load_options: LoadOptions = Field(default_factory=LoadOptions, description="Model loading parameters")
     export_options: dict[str, Any] = Field(default_factory=dict, description="Freeform export options")
 
 
@@ -88,7 +94,7 @@ class LivestreamConfig(BaseModel):
 class AdvancedConfig(BaseModel):
     """Advanced settings section. Password-protected in admin UI."""
 
-    models: list[ModelConfig] = Field(default_factory=list, description="AI model definitions")
+    models: dict[str, ModelConfig] = Field(default_factory=dict, description="AI model definitions")
     timings: dict[str, Any] = Field(default_factory=dict, description="Freeform timing values")
     datasend: DatasendConfig = Field(default_factory=DatasendConfig, description="API settings")
     livestream: LivestreamConfig = Field(default_factory=LivestreamConfig, description="Streaming settings")

@@ -35,23 +35,30 @@ advanced:
   # Models (Formatted)
   # ----------------------------------------------------------------------------
   models:
-    - name: "person-11n-21april"
-      type: "YOLO"
-      task: "detect"
-      path: ""
+    person-det:
+      download_key: "" # Direct key for download from server, leave empty for type based latest call
+      type: "person-det"
       batch: 1
-      backend: "engine"
+      path: "" # Should be filled by the deployment system
+      load_options:
+        lib_type: "YOLO"
+        task: "detect"
       export_options:
+        backend: "engine"
         img_size: 640
         dynamic: true
         half: true
-    - name: "gender-classifier-20june"
-      type: "YOLO"
-      task: "classify"
-      path: ""
-      batch: 1
-      backend: "engine"
+
+    gender-cls:
+      download_key: "" # Direct key for download from server, leave empty for type based latest call
+      type: "gender-cls"
+      batch: 2
+      path: "" # Should be filled by the deployment system
+      load_options:
+        lib_type: "YOLO" # Can be YOLO, YOLOE etc.
+        task: "cls"
       export_options:
+        backend: "onnx"
         img_size: 640
         dynamic: true
         half: true

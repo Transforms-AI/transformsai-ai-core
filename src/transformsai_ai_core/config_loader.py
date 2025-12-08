@@ -112,11 +112,9 @@ def resolve_model_paths(config: dict[str, Any], base_dir: Path, download: bool =
     Returns:
         Updated config with resolved model paths
     """
-    models = config.get("advanced", {}).get("models", [])
+    models = config.get("advanced", {}).get("models", {})
 
-    for model in models:
-        model_name = model.get("name", "")
-
+    for model_name, model in models.items():
         if not model_name:
             continue
 
@@ -239,7 +237,8 @@ def get_formatted_fields() -> dict[str, list[str]]:
         "meta": ["name", "version", "token"],
         "cameras": ["local", "local_source", "rtsp_source"],
         "cameras.rtsp_source": ["username", "password", "ip", "port", "path"],
-        "advanced.models": ["name", "type", "task", "path", "batch", "backend"],
+        "advanced.models": ["download_key", "type", "batch", "path", "load_options"],
+        "advanced.models.*.load_options": ["lib_type", "task"],
         "advanced.datasend": ["enabled", "base_url", "secret_keys"],
         "advanced.livestream": ["enabled", "mediamtx_ip", "rtsp_port"],
     }
