@@ -784,6 +784,7 @@ class DataUploader:
         timestamp: str,
         live_url: Optional[str] = None,
         method: str = "POST",
+        extra_data: Optional[Dict] = {},
         status_log: str = "Heartbeat received successfully."
         ) -> None:
         """Send heartbeat with device information"""
@@ -797,6 +798,8 @@ class DataUploader:
             "hostname": self.hostname,
             "source": self.source
         }
+        
+        heartbeat_data.update(extra_data)
         
         if self.project_version:
             heartbeat_data["version"] = self.project_version

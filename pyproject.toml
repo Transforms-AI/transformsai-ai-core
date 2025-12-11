@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transformsai-ai-core"
-version = "1.6.1"
+version = "1.6.2"
 description = "TransformsAI Core Library - Utilities for AI vision applications"
 readme = "README.md"
 authors = [
