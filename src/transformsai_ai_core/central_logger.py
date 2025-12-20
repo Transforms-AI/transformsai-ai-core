@@ -84,6 +84,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("gradio").setLevel(logging.INFO)
 logging.getLogger("qdrant_client").setLevel(logging.INFO)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
+logging.getLogger("watchdog").setLevel(logging.WARNING)
 
 # --- 3. The Public API Function ---
 
