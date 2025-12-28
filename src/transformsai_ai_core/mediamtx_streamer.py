@@ -6,6 +6,7 @@ import signal
 import os
 import psutil
 import socket
+import re
 from threading import Lock
 from collections import deque
 from .central_logger import get_logger
@@ -21,7 +22,8 @@ class MediaMTXStreamer:
     """
     
     def __init__(self, mediamtx_ip, rtsp_port, camera_sn_id, fps=30, 
-                 frame_width=1920, frame_height=1080, bitrate="1500k"):
+                 frame_width=1920, frame_height=1080, bitrate="1500k",
+                 debug_log_interval=60.0):
         self.mediamtx_ip = mediamtx_ip
         self.rtsp_port = rtsp_port
         self.camera_sn_id = camera_sn_id
@@ -29,12 +31,13 @@ class MediaMTXStreamer:
         self.frame_width = frame_width
         self.frame_height = frame_height
         self.bitrate = bitrate
+        self.webrtc_port = 8889  # Default MediaMTX WebRTC port
         
         # Setup logging using central logger
         self.logger = get_logger(self)
         
-        # Build RTSP URL
-        self.rtsp_url = f"rtsp://{self.mediamtx_ip}:{self.rtsp_port}/live/cam_sn_{self.camera_sn_id}"
+        # Build URLs using helper methods
+        self.rtsp_url = self._build_rtsp_url()
         
         # Process management
         self.ffmpeg_process = None
@@ -45,7 +48,7 @@ class MediaMTXStreamer:
         
         # Performance tracking for debug logging
         self.last_debug_log_time = 0
-        self.debug_log_interval = 30.0  # Log performance every 30 seconds
+        self.debug_log_interval = debug_log_interval
         self.frame_count = 0
         self.frames_since_last_log = 0
         self.last_frame_time = 0
@@ -65,7 +68,28 @@ class MediaMTXStreamer:
         self.processing_bottleneck_threshold = 0.020  # 20ms threshold
         self.network_bottleneck_threshold = 0.100  # 100ms threshold
         
-        self.logger.info(f"Streamer initialized: {self.rtsp_url}")
+        self.logger.info(f"[Stream] Initialized streamer for camera {self.camera_sn_id}: {self.rtsp_url}")
+    
+    def _is_ip_address(self, host):
+        """Check if host is an IP address (IPv4 or IPv6)."""
+        # Match IPv4 pattern
+        ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+        # Match IPv6 pattern (simplified)
+        ipv6_pattern = r'^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'
+        return bool(re.match(ipv4_pattern, host) or re.match(ipv6_pattern, host))
+    
+    def _build_rtsp_url(self):
+        """Build RTSP URL with port."""
+        return f"rtsp://{self.mediamtx_ip}:{self.rtsp_port}/live/cam_sn_{self.camera_sn_id}"
+    
+    def _build_webrtc_url(self):
+        """Build WebRTC URL with port only for IP addresses.
+        Currently it assumes, if a hostname is used, HTTPS is preferred with no port.
+        """
+        if self._is_ip_address(self.mediamtx_ip):
+            return f"http://{self.mediamtx_ip}:{self.webrtc_port}/live/cam_sn_{self.camera_sn_id}/"
+        else:
+            return f"https://{self.mediamtx_ip}/live/cam_sn_{self.camera_sn_id}/"
     
     def start_streaming(self):
         """Start FFmpeg streaming process with diagnostics."""
@@ -76,7 +100,7 @@ class MediaMTXStreamer:
         
         # Prevent rapid restarts (minimum 5 seconds between restarts)
         if current_time - self.last_restart_time < 5.0:
-            self.logger.warning("Preventing rapid restart - waiting...")
+            self.logger.warning("[Stream] Preventing rapid restart - waiting...")
             return False
         
         try:
@@ -127,41 +151,29 @@ class MediaMTXStreamer:
                 self.restart_count += 1
                 self.last_restart_time = current_time
                 
-                # Print comprehensive stream information
+                # Print stream information
                 self._print_stream_info()
                 
-                self.logger.info(f"✅ Streaming started successfully (restart #{self.restart_count})")
+                self.logger.info(f"[Stream] Streaming started successfully (restart #{self.restart_count})")
                 return True
             else:
                 # Process died immediately - check log
                 log_file.close()
                 with open(log_file_path, 'r') as f:
                     error_log = f.read()
-                self.logger.error(f"❌ FFmpeg failed to start. Log: {error_log[-500:]}")
+                self.logger.error(f"[FFmpeg] Failed to start. Log file: {log_file_path}")
+                self.logger.error(f"[FFmpeg] Error output: {error_log[-500:]}")
                 return False
                 
         except Exception as e:
-            self.logger.error(f"❌ Error starting stream: {e}")
+            self.logger.error(f"[Stream] Error starting stream: {e}")
             return False
     
     def _print_stream_info(self):
-        """Print comprehensive information about the stream."""
-        # Get log file path
-        logs_dir = os.path.join(os.getcwd(), 'logs')
-        log_file_path = os.path.join(logs_dir, f'ffmpeg_cam_{self.camera_sn_id}.log')
-        
-        self.logger.info("📺 STREAM INFORMATION:")
-        self.logger.info(f"   🎥 RTSP URL: {self.rtsp_url}")
-        self.logger.info(f"   🔗 VLC Command: vlc {self.rtsp_url}")
-        self.logger.info(f"   🔗 FFplay Command: ffplay {self.rtsp_url}")
-        self.logger.info(f"   🔗 HLS URL: {self.get_hls_url()}")
-        self.logger.info(f"   ⚙️ Resolution: {self.frame_width}x{self.frame_height} @ {self.fps}fps")
-        self.logger.info(f"   📊 Bitrate: {self.bitrate}")
-        
-        # Additional MediaMTX web interface info (if available)
-        web_port = 8889  # Default MediaMTX web port
-        self.logger.info(f"   🌐 MediaMTX Web UI: http://{self.mediamtx_ip}:{web_port}")
-        self.logger.info(f"   📋 FFMPEG Serivce Log File: {log_file_path}")
+        """Print stream information."""
+        self.logger.info(f"[Stream] RTSP URL: {self.rtsp_url}")
+        self.logger.info(f"[Stream] WebRTC URL: {self._build_webrtc_url()}")
+        self.logger.info(f"[Stream] Resolution: {self.frame_width}x{self.frame_height} @ {self.fps}fps, Bitrate: {self.bitrate}")
     
     def stop_streaming(self):
         """Stop the streaming process."""
@@ -193,11 +205,11 @@ class MediaMTXStreamer:
                         self.ffmpeg_process.kill()
                 
             except Exception as e:
-                self.logger.warning(f"Error during cleanup: {e}")
+                self.logger.warning(f"[Stream] Error during cleanup: {e}")
             
             self.ffmpeg_process = None
         
-        self.logger.info("⏹️  Streaming stopped")
+        self.logger.info("[Stream] Streaming stopped")
     
     def update_frame(self, frame):
         """
@@ -212,13 +224,13 @@ class MediaMTXStreamer:
         # Process health check with less frequent restarts
         if self.ffmpeg_process.poll() is not None:
             # Process died, but don't restart immediately
-            self.logger.warning(f"⚠️  FFmpeg process died (exit code: {self.ffmpeg_process.returncode})")
+            self.logger.warning(f"[FFmpeg] Process died (exit code: {self.ffmpeg_process.returncode})")
             self.is_streaming = False
             self.stop_streaming()
             
             # Only attempt restart if not too frequent
             if frame_start_time - self.last_restart_time > 10.0:  # 10 second cooldown
-                self.logger.info("🔄 Attempting to restart stream...")
+                self.logger.info("[Stream] Attempting to restart stream...")
                 if self.start_streaming():
                     return self.update_frame(frame)  # Retry once
             
@@ -267,12 +279,12 @@ class MediaMTXStreamer:
                 return True
                 
         except (BrokenPipeError, OSError) as e:
-            self.logger.warning(f"⚠️  Pipe error: {e}")
+            self.logger.warning(f"[Stream] Pipe error: {e}")
             self.is_streaming = False
             self.dropped_frames += 1
             return False
         except Exception as e:
-            self.logger.error(f"❌ Frame write error: {e}")
+            self.logger.error(f"[Stream] Frame write error: {e}")
             self.dropped_frames += 1
             return False
     
@@ -295,7 +307,7 @@ class MediaMTXStreamer:
                 self.network_ping_times.append(999.0)  # Connection failed
                 
         except Exception as e:
-            self.logger.warning(f"Network check failed: {e}")
+            self.logger.warning(f"[Network] Health check failed: {e}")
             self.network_ping_times.append(999.0)
     
     def _get_system_metrics(self):
@@ -333,54 +345,8 @@ class MediaMTXStreamer:
                 'ffmpeg_memory': 0
             }
     
-    def _analyze_bottlenecks(self):
-        """Analyze performance data to identify bottlenecks."""
-        bottlenecks = []
-        
-        # Analyze frame write times
-        if self.frame_write_times:
-            avg_write_time = sum(self.frame_write_times) / len(self.frame_write_times)
-            max_write_time = max(self.frame_write_times)
-            
-            if avg_write_time > self.processing_bottleneck_threshold:
-                bottlenecks.append(f"SLOW FRAME WRITES (avg: {avg_write_time*1000:.1f}ms)")
-            
-            if max_write_time > 0.100:  # 100ms
-                bottlenecks.append(f"FRAME WRITE SPIKES (max: {max_write_time*1000:.1f}ms)")
-        
-        # Analyze resize times
-        if self.frame_resize_times:
-            avg_resize_time = sum(self.frame_resize_times) / len(self.frame_resize_times)
-            max_resize_time = max(self.frame_resize_times)
-            
-            if avg_resize_time > 0.010:  # 10ms
-                bottlenecks.append(f"SLOW FRAME RESIZE (avg: {avg_resize_time*1000:.1f}ms)")
-        
-        # Analyze network latency
-        if self.network_ping_times:
-            recent_pings = [p for p in self.network_ping_times if p < 999.0]
-            if recent_pings:
-                avg_ping = sum(recent_pings) / len(recent_pings)
-                if avg_ping > self.network_bottleneck_threshold:
-                    bottlenecks.append(f"HIGH NETWORK LATENCY (avg: {avg_ping*1000:.1f}ms)")
-            
-            # Check for connection failures
-            failed_pings = len([p for p in self.network_ping_times if p >= 999.0])
-            if failed_pings > 0:
-                bottlenecks.append(f"NETWORK CONNECTION ISSUES ({failed_pings}/{len(self.network_ping_times)} failed)")
-        
-        # Check buffer issues
-        if self.buffer_full_count > 10:
-            bottlenecks.append(f"FFMPEG BUFFER ISSUES ({self.buffer_full_count} slow writes)")
-        
-        # Check dropped frames
-        if self.dropped_frames > 0:
-            bottlenecks.append(f"DROPPED FRAMES ({self.dropped_frames} total)")
-        
-        return bottlenecks
-    
     def _log_performance_debug(self):
-        """Log comprehensive debug performance information."""
+        """Log performance debug information."""
         current_time = time.time()
         time_elapsed = current_time - self.last_debug_log_time
         
@@ -396,61 +362,30 @@ class MediaMTXStreamer:
         system_metrics = self._get_system_metrics()
         
         # Calculate timing statistics
-        write_stats = ""
-        resize_stats = ""
-        network_stats = ""
-        
         if self.frame_write_times:
             avg_write = sum(self.frame_write_times) / len(self.frame_write_times)
             max_write = max(self.frame_write_times)
-            write_stats = f"avg: {avg_write*1000:.1f}ms, max: {max_write*1000:.1f}ms"
+            self.logger.debug(f"[Performance] Frame write: avg={avg_write*1000:.1f}ms, max={max_write*1000:.1f}ms")
         
         if self.frame_resize_times:
             avg_resize = sum(self.frame_resize_times) / len(self.frame_resize_times)
             max_resize = max(self.frame_resize_times)
-            resize_stats = f"avg: {avg_resize*1000:.1f}ms, max: {max_resize*1000:.1f}ms"
+            self.logger.debug(f"[Performance] Frame resize: avg={avg_resize*1000:.1f}ms, max={max_resize*1000:.1f}ms")
         
         if self.network_ping_times:
             recent_pings = [p for p in self.network_ping_times if p < 999.0]
             if recent_pings:
                 avg_ping = sum(recent_pings) / len(recent_pings)
                 max_ping = max(recent_pings)
-                network_stats = f"avg: {avg_ping*1000:.1f}ms, max: {max_ping*1000:.1f}ms"
+                self.logger.debug(f"[Performance] Network ping: avg={avg_ping*1000:.1f}ms, max={max_ping*1000:.1f}ms")
             else:
-                network_stats = "CONNECTION FAILED"
+                self.logger.debug(f"[Performance] Network ping: CONNECTION FAILED")
         
-        # Analyze bottlenecks
-        bottlenecks = self._analyze_bottlenecks()
-        
-        # Log comprehensive debug information
-        self.logger.debug("📊 DETAILED PERFORMANCE ANALYSIS:")
-        self.logger.debug(f"   📈 Current FPS: {avg_fps:.2f} / {self.fps} (target)")
-        self.logger.debug(f"   🎬 Total Frames: {self.frame_count} | Dropped: {self.dropped_frames}")
-        self.logger.debug(f"   ⚡ Process Status: {process_status}")
-        
-        self.logger.debug("🔍 TIMING BREAKDOWN:")
-        if write_stats:
-            self.logger.debug(f"   ✍️  Frame Write: {write_stats}")
-        if resize_stats:
-            self.logger.debug(f"   🔄 Frame Resize: {resize_stats}")
-        if network_stats:
-            self.logger.debug(f"   🌐 Network Ping: {network_stats}")
-        
-        self.logger.debug("💻 SYSTEM RESOURCES:")
-        self.logger.debug(f"   🖥️  System CPU: {system_metrics['system_cpu']:.1f}%")
-        self.logger.debug(f"   🧠 System RAM: {system_metrics['system_memory']:.1f}%")
-        self.logger.debug(f"   🎞️  FFmpeg CPU: {system_metrics['ffmpeg_cpu']:.1f}%")
-        self.logger.debug(f"   📊 FFmpeg RAM: {system_metrics['ffmpeg_memory']:.1f}%")
-        
-        if bottlenecks:
-            self.logger.warning("⚠️  IDENTIFIED BOTTLENECKS:")
-            for bottleneck in bottlenecks:
-                self.logger.warning(f"   🔴 {bottleneck}")
-        else:
-            self.logger.debug("   ✅ No major bottlenecks detected")
-        
-        self.logger.debug(f"   📡 RTSP URL: {self.rtsp_url}")
-        self.logger.debug(f"   🔢 Buffer Issues: {self.buffer_full_count}")
+        # Log performance summary
+        self.logger.debug(f"[Performance] FPS: {avg_fps:.2f}/{self.fps} | Frames: {self.frame_count} | Dropped: {self.dropped_frames} | Process: {process_status}")
+        self.logger.debug(f"[Performance] System: CPU={system_metrics['system_cpu']:.1f}%, RAM={system_metrics['system_memory']:.1f}%")
+        self.logger.debug(f"[Performance] FFmpeg: CPU={system_metrics['ffmpeg_cpu']:.1f}%, RAM={system_metrics['ffmpeg_memory']:.1f}%")
+        self.logger.debug(f"[Performance] Buffer issues: {self.buffer_full_count}")
         
         # Reset counters
         self.frames_since_last_log = 0
@@ -468,9 +403,13 @@ class MediaMTXStreamer:
         """Get the RTSP URL."""
         return self.rtsp_url
     
+    def get_webrtc_url(self):
+        """Get the WebRTC URL."""
+        return self._build_webrtc_url()
+    
     def get_hls_url(self, hls_port=8889):
-        """Get the HLS URL for the stream (served by MediaMTX)."""
-        return f"http://{self.mediamtx_ip}:{hls_port}/live/cam_sn_{self.camera_sn_id}/"
+        """This is deprecated, will just return webrtc for legacy support."""
+        return self.get_webrtc_url()
     
     def get_stats(self):
         """Get comprehensive streaming statistics."""
@@ -491,12 +430,12 @@ class MediaMTXStreamer:
                 avg_ping_time = sum(recent_pings) / len(recent_pings)
         
         system_metrics = self._get_system_metrics()
-        bottlenecks = self._analyze_bottlenecks()
         
         return {
             'is_streaming': self.is_streaming,
             'restart_count': self.restart_count,
             'rtsp_url': self.rtsp_url,
+            'webrtc_url': self.get_webrtc_url(),
             'resolution': f"{self.frame_width}x{self.frame_height}",
             'fps': self.fps,
             'process_active': self.is_active(),
@@ -506,6 +445,5 @@ class MediaMTXStreamer:
             'avg_resize_time_ms': avg_resize_time * 1000,
             'avg_ping_time_ms': avg_ping_time * 1000,
             'buffer_issues': self.buffer_full_count,
-            'system_metrics': system_metrics,
-            'bottlenecks': bottlenecks
+            'system_metrics': system_metrics
         }
