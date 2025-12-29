@@ -57,7 +57,7 @@ trt = [
 # RKNN option - includes RKNN but not TensorRT
 rknn = [
     "onnx>=1.20.0",
-    "onnxruntime-gpu>=1.23.2",
+    "onnxruntime>=1.23.2",
     "onnxslim>=0.1.80",
     "rknn-toolkit-lite2>=2.3.2; sys_platform == 'aarch64'",
     "torch>=2.4.0", 
