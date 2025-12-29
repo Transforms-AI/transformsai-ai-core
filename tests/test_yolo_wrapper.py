@@ -72,10 +72,14 @@ def check_prerequisites():
 
 print_test_header(1, "YOLO Basic Loading (No Export)")
 try:
+    model_dict = {
+        "path": YOLO_MODEL,
+        "export": False,
+        "batch": 1
+    }
+    
     model = YOLOWrapper(
-        model_path=YOLO_MODEL,
-        export=False,
-        batch_size=1
+        model_dict=model_dict
     )
     logger.success("✓ YOLO model loaded successfully")
     logger.info(f"  Original path: {model.original_model_path}")
@@ -88,10 +92,15 @@ except Exception as e:
 
 print_test_header(2, "YOLO Single Image Prediction")
 try:
+    
+    model_dict = {
+        "path": YOLO_MODEL,
+        "export": False,
+        "batch": 1
+    }
+    
     model = YOLOWrapper(
-        model_path=YOLO_MODEL,
-        export=False,
-        batch_size=1
+        model_dict=model_dict
     )
     
     results = model.predict(str(TEST_IMAGE))
@@ -119,10 +128,15 @@ except Exception as e:
 
 print_test_header(3, "YOLO Batch Prediction (5 images, batch_size=2)")
 try:
+    
+    model_dict = {
+        "path": YOLO_MODEL,
+        "export": False,
+        "batch": 2
+    }
+    
     model = YOLOWrapper(
-        model_path=YOLO_MODEL,
-        export=False,
-        batch_size=2
+        model_dict=model_dict
     )
     
     # Create list of 5 image paths (using same image)
@@ -151,10 +165,12 @@ try:
     # First initialization - should trigger export
     logger.info("First load - expecting export...")
     model1 = YOLOWrapper(
-        model_path=YOLO_MODEL,
-        export=True,
-        export_options={"format": "onnx", "imgsz": 640},
-        batch_size=1
+        model_dict={
+            "path": YOLO_MODEL,
+            "export": True,
+            "export_options": {"format": "onnx", "imgsz": 640},
+            "batch": 1
+        }
     )
     
     if model1.exported_model_path and model1.exported_model_path.exists():
@@ -167,10 +183,12 @@ try:
         # Second initialization - should use cached export
         logger.info("Second load - expecting to use cached export...")
         model2 = YOLOWrapper(
-            model_path=YOLO_MODEL,
-            export=True,
-            export_options={"format": "onnx", "imgsz": 640},
-            batch_size=1
+            model_dict={
+                "path": YOLO_MODEL,
+                "export": True,
+                "export_options": {"format": "onnx", "imgsz": 640},
+                "batch": 1
+            }
         )
         
         if model2.exported_model_path == model1.exported_model_path:
@@ -200,14 +218,17 @@ try:
     # Export to TensorRT engine
     logger.info("Exporting to TensorRT engine format...")
     model = YOLOWrapper(
-        model_path=YOLO_MODEL,
-        export=True,
-        export_options={
-            "format": "engine",
-            "imgsz": 640,
-            "half": True  # FP16 optimization
-        },
-        batch_size=1
+        model_dict={
+            "path": YOLO_MODEL,
+            "export": True,
+            "export_options": {
+                "format": "engine",
+                "batch" : 1,
+                "imgsz": 640,
+                "half": True  # FP16 optimization
+            },
+            "batch": 1
+        }
     )
     
     if model.exported_model_path and model.exported_model_path.exists():
@@ -244,9 +265,11 @@ try:
     for batch_size in [1, 3, 5, 10]:
         logger.info(f"Testing batch_size={batch_size}...")
         model = YOLOWrapper(
-            model_path=YOLO_MODEL,
-            export=False,
-            batch_size=batch_size
+            model_dict={
+                "path": YOLO_MODEL,
+                "export": False,
+                "batch": batch_size
+            }
         )
         
         results = model.predict(images)
@@ -262,9 +285,11 @@ except Exception as e:
 print_test_header(7, "YOLO Path Type Handling")
 try:
     model = YOLOWrapper(
-        model_path=YOLO_MODEL,
-        export=False,
-        batch_size=1
+        model_dict={
+            "path": YOLO_MODEL,
+            "export": False,
+            "batch": 1
+        }
     )
     
     # Test with string path
@@ -294,9 +319,12 @@ except Exception as e:
 print_test_header(8, "YOLOE Basic Loading (No Export)")
 try:
     model = YOLOEWrapper(
-        model_path=YOLOE_MODEL,
-        export=False,
-        batch_size=1
+        model_dict={
+            "path": YOLOE_MODEL,
+            "load_options": {"task": "segment", "set_classes": ["person", "car", "bike"]},
+            "export": False,
+            "batch": 1
+        }
     )
     logger.success("✓ YOLOE model loaded successfully")
     logger.info(f"  Original path: {model.original_model_path}")
@@ -310,9 +338,12 @@ except Exception as e:
 print_test_header(9, "YOLOE Single Image Prediction")
 try:
     model = YOLOEWrapper(
-        model_path=YOLOE_MODEL,
-        export=False,
-        batch_size=1
+        model_dict={
+            "path": YOLOE_MODEL,
+            "load_options": {"task": "segment", "set_classes": ["person", "car", "bike"]},
+            "export": False,
+            "batch": 1
+        }
     )
     
     results = model.predict(str(TEST_IMAGE))
@@ -341,9 +372,12 @@ except Exception as e:
 print_test_header(10, "YOLOE Batch Prediction (5 images, batch_size=2)")
 try:
     model = YOLOEWrapper(
-        model_path=YOLOE_MODEL,
-        export=False,
-        batch_size=2
+        model_dict={
+            "path": YOLOE_MODEL,
+            "load_options": {"task": "segment", "set_classes": ["person", "car", "bike"]},
+            "export": False,
+            "batch": 2
+        }
     )
     
     images = [str(TEST_IMAGE)] * 5
@@ -368,10 +402,13 @@ try:
     
     # Initialize with export
     model = YOLOEWrapper(
-        model_path=YOLOE_MODEL,
-        export=True,
-        export_options={"format": "onnx", "imgsz": 640},
-        batch_size=1
+        model_dict={
+            "path": YOLOE_MODEL,
+            "export": True,
+            "load_options": {"task": "segment", "set_classes": ["person", "car", "bike"]},
+            "export_options": {"format": "onnx", "imgsz": 640},
+            "batch": 1
+        }
     )
     
     if model.exported_model_path and model.exported_model_path.exists():

@@ -14,3 +14,4 @@ logs
 *.pt
 *.onnx
 *.engine
+*.ts

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transformsai-ai-core"
-version = "2.0.2"
+version = "2.1.0"
 description = "TransformsAI Core Library - Utilities for AI vision applications"
 readme = "README.md"
 authors = [
@@ -31,7 +31,6 @@ dependencies = [
     "opencv-python>=4.5.0",
     "numpy>=1.26.4,<2.0.0",
     "requests>=2.25.0",
-    # "paho-mqtt>=1.6.0", # Uncomment if MQTT functionality is needed
     "psutil>=5.8.0",
     "PyYAML>=6.0",
     "fsspec>=2022.1.0",
@@ -39,11 +38,11 @@ dependencies = [
     "python-dateutil>=2.8.0",
     "pytz>=2021.1",
     "loguru>=0.7.3",
-    "pydantic>=2.12.0",
+    "pydantic>=2.12.0"
 ]
 
 [project.optional-dependencies]
-# TensorRT option - includes TensorRT but not RKNN
+# TensorRT option
 trt = [
     "onnx>=1.20.0",
     "onnxruntime-gpu>=1.23.2",
@@ -51,29 +50,32 @@ trt = [
     "tensorrt-cu12>=10.13.3.9",
     "torch>=2.4.0", 
     "torchvision>=0.19.0", 
-    "ultralytics>=8.3.241"
+    "ultralytics>=8.3.241",
+    "clip",
 ]
 
-# RKNN option - includes RKNN but not TensorRT
+# RKNN option
 rknn = [
     "onnx>=1.16.0",
     "onnxruntime>=1.23.2",
     "onnxslim>=0.1.80",
     "rknn-toolkit-lite2>=2.3.2; sys_platform == 'aarch64'",
-    "rknn-toolkit2>=2.3.2",
-    "torch>=2.0.0", 
+    "rknn-toolkit2>=2.3.2; sys_platform != 'darwin'",
+    "torch>=2.0.0,<2.3.0", 
     "torchvision>=0.10.0", 
-    "ultralytics>=8.3.241"
+    "ultralytics>=8.3.241",
+    "clip",
 ]
 
-# ONNX option - includes ONNX packages but not TensorRT or RKNN
+# ONNX option
 onnx = [
     "onnx>=1.20.0",
     "onnxruntime-gpu>=1.23.2",
     "onnxslim>=0.1.80",
     "torch>=2.4.0", 
     "torchvision>=0.19.0", 
-    "ultralytics>=8.3.241"
+    "ultralytics>=8.3.241",
+    "clip",
 ]
 
 # All option - includes everything
@@ -85,7 +87,8 @@ all = [
     "rknn-toolkit-lite2>=2.3.2; sys_platform == 'aarch64'",
     "ultralytics>=8.3.241",
     "torch>=2.4.0", 
-    "torchvision>=0.19.0", 
+    "torchvision>=0.19.0",
+    "clip",
 ]
 
 # --- Setuptools Configuration (Replaces setup.cfg and MANIFEST.in) ---
@@ -95,3 +98,17 @@ where = ["src"]
 
 [tool.setuptools]
 include-package-data = true
+
+# UV environment configuration
+[tool.uv]
+conflicts = [
+    [
+        { extra = "all" },
+        { extra = "rknn" },
+        { extra = "trt" },
+        { extra = "onnx" },
+    ],
+]
+
+[tool.uv.sources]
+clip = { git = "https://github.com/ultralytics/CLIP.git", rev = "643beff3883b5720d94b6b9c9eca12fa9fb72fb1" }

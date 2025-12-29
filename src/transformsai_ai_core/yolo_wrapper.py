@@ -57,20 +57,14 @@ class YOLOWrapper(YOLO):
     
     def __init__(
         self,
-        model_path: Union[str, Path],
-        export: bool = False,
-        export_options: dict[str, Any] = None,
-        batch_size: int = 1,
+        model_dict: dict[str, Any],
         **kwargs
     ):
         """
         Initialize YOLO wrapper with optional export and batching.
         
         Args:
-            model_path: Path to YOLO model file (.pt, .onnx, etc.)
-            export: If True, auto-export model if exported version doesn't exist
-            export_options: Dict of export parameters (format, half, int8, dynamic, imgsz, etc.)
-            batch_size: Batch size for sequential inference (default: 1)
+            model_dict: Dictionary containing model configuration
             **kwargs: Additional arguments passed to YOLO constructor
         """
         if not ULTRALYTICS_AVAILABLE:
@@ -80,10 +74,11 @@ class YOLOWrapper(YOLO):
             )
         
         self.logger = get_logger(self)
-        self.original_model_path = Path(model_path)
-        self.export_enabled = export
-        self.export_options = export_options or {}
-        self.batch_size = batch_size
+        self.original_model_path = Path(model_dict["path"])
+        self.task = model_dict.get("load_options", {}).get("task", "detect")
+        self.export_enabled = model_dict.get("export", False)
+        self.export_options = model_dict.get("export_options", {})
+        self.batch_size = model_dict.get("batch", 1)
         self.exported_model_path = None
         
         # Determine model path to load (exported or original)
@@ -91,13 +86,13 @@ class YOLOWrapper(YOLO):
         
         # Initialize parent YOLO class
         try:
-            super().__init__(model_to_load, **kwargs)
+            super().__init__(model_to_load, task=self.task, **kwargs)
             self.logger.info(f"Loaded YOLO model: {model_to_load}")
         except Exception as e:
             # Fallback to original if exported model fails
             if self.exported_model_path and model_to_load != str(self.original_model_path):
                 self.logger.warning(f"Failed to load exported model, falling back to original: {e}")
-                super().__init__(str(self.original_model_path), **kwargs)
+                super().__init__(str(self.original_model_path), task=self.task, **kwargs)
                 self.exported_model_path = None
             else:
                 raise
@@ -126,7 +121,7 @@ class YOLOWrapper(YOLO):
         self.logger.info(f"Exporting model to {export_format} format...")
         try:
             # Load original model temporarily for export
-            temp_model = YOLO(str(self.original_model_path))
+            temp_model = YOLO(str(self.original_model_path), task=self.task)
             
             # Export with user-provided options
             export_result = temp_model.export(**self.export_options)
@@ -211,7 +206,7 @@ class YOLOWrapper(YOLO):
         return all_results
 
 
-class YOLOEWrapper(YOLOE):
+class YOLOEWrapper(YOLOE): 
     """
     YOLOE wrapper with auto-export and sequential batching.
     
@@ -222,20 +217,14 @@ class YOLOEWrapper(YOLOE):
     
     def __init__(
         self,
-        model_path: Union[str, Path],
-        export: bool = False,
-        export_options: dict[str, Any] = None,
-        batch_size: int = 1,
+        model_dict: dict[str, Any],
         **kwargs
     ):
         """
         Initialize YOLOE wrapper with optional export and batching.
         
         Args:
-            model_path: Path to YOLOE model file (.pt, .onnx, etc.)
-            export: If True, auto-export model if exported version doesn't exist
-            export_options: Dict of export parameters (format, half, int8, dynamic, imgsz, etc.)
-            batch_size: Batch size for sequential inference (default: 1)
+            model_dict: Dictionary containing model configuration
             **kwargs: Additional arguments passed to YOLOE constructor
         """
         if not ULTRALYTICS_AVAILABLE:
@@ -245,10 +234,12 @@ class YOLOEWrapper(YOLOE):
             )
         
         self.logger = get_logger(self)
-        self.original_model_path = Path(model_path)
-        self.export_enabled = export
-        self.export_options = export_options or {}
-        self.batch_size = batch_size
+        self.original_model_path = Path(model_dict["path"])
+        self.export_enabled = model_dict.get("export", False)
+        self.export_options = model_dict.get("export_options", {})
+        self.batch_size = model_dict.get("batch", 1)
+        self.task = model_dict.get("load_options", {}).get("task", "detect")
+        self.set_classes = None # TODO: Currently set classes doesn't work, FIX LATER
         self.exported_model_path = None
         
         # Determine model path to load (exported or original)
@@ -256,13 +247,16 @@ class YOLOEWrapper(YOLOE):
         
         # Initialize parent YOLOE class
         try:
-            super().__init__(model_to_load, **kwargs)
+            super().__init__(model_to_load, task=self.task, **kwargs)
+            if not self.export_enabled and self.set_classes is not None:
+                # If the model is not exported, set classes after loading
+                super().set_classes(self.set_classes, super().get_text_pe(self.set_classes))
             self.logger.info(f"Loaded YOLOE model: {model_to_load}")
         except Exception as e:
             # Fallback to original if exported model fails
             if self.exported_model_path and model_to_load != str(self.original_model_path):
                 self.logger.warning(f"Failed to load exported model, falling back to original: {e}")
-                super().__init__(str(self.original_model_path), **kwargs)
+                super().__init__(str(self.original_model_path), task=self.task, **kwargs)
                 self.exported_model_path = None
             else:
                 raise
@@ -291,7 +285,10 @@ class YOLOEWrapper(YOLOE):
         self.logger.info(f"Exporting model to {export_format} format...")
         try:
             # Load original model temporarily for export
-            temp_model = YOLOE(str(self.original_model_path))
+            temp_model = YOLOE(str(self.original_model_path), task=self.task)
+            
+            if self.set_classes is not None:
+                temp_model.set_classes(self.set_classes, temp_model.get_text_pe(self.set_classes))
             
             # Export with user-provided options
             export_result = temp_model.export(**self.export_options)
