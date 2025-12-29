@@ -189,7 +189,55 @@ except Exception as e:
     logger.error(f"✗ Export test failed: {e}", traceback=True)
 
 
-print_test_header(5, "YOLO Different Batch Sizes")
+print_test_header(5, "YOLO TensorRT Engine Export and Run")
+try:
+    # Clean up any existing engine file
+    engine_path = Path(YOLO_MODEL).with_suffix('.engine')
+    if engine_path.exists():
+        logger.info(f"Removing existing engine file: {engine_path}")
+        engine_path.unlink()
+    
+    # Export to TensorRT engine
+    logger.info("Exporting to TensorRT engine format...")
+    model = YOLOWrapper(
+        model_path=YOLO_MODEL,
+        export=True,
+        export_options={
+            "format": "engine",
+            "imgsz": 640,
+            "half": True  # FP16 optimization
+        },
+        batch_size=1
+    )
+    
+    if model.exported_model_path and model.exported_model_path.exists():
+        logger.success(f"✓ TensorRT engine created: {model.exported_model_path}")
+        
+        # Test prediction with engine
+        results = model.predict(str(TEST_IMAGE))
+        logger.success(f"✓ Prediction with TensorRT engine successful")
+        
+        # Analyze results
+        result = results[0]
+        num_detections = len(result.boxes) if hasattr(result.boxes, '__len__') else 0
+        logger.info(f"  Number of detections: {num_detections}")
+        
+        if num_detections > 0:
+            logger.info(f"  Classes detected: {result.boxes.cls.tolist()}")
+            logger.info(f"  Confidences: {[f'{c:.3f}' for c in result.boxes.conf.tolist()]}")
+        
+        # Clean up
+        if engine_path.exists():
+            engine_path.unlink()
+            logger.info(f"Cleaned up: {engine_path}")
+    else:
+        logger.warning("⚠ Engine export did not create file (may have failed or requires NVIDIA GPU)")
+        
+except Exception as e:
+    logger.error(f"✗ Engine export test failed: {e}", traceback=True)
+
+
+print_test_header(6, "YOLO Different Batch Sizes")
 try:
     images = [str(TEST_IMAGE)] * 10
     
@@ -211,7 +259,7 @@ except Exception as e:
     logger.error(f"✗ Batch size test failed: {e}", traceback=True)
 
 
-print_test_header(6, "YOLO Path Type Handling")
+print_test_header(7, "YOLO Path Type Handling")
 try:
     model = YOLOWrapper(
         model_path=YOLO_MODEL,
@@ -243,7 +291,7 @@ except Exception as e:
 # SECTION 3: YOLOE WRAPPER TESTS
 # =============================================================================
 
-print_test_header(7, "YOLOE Basic Loading (No Export)")
+print_test_header(8, "YOLOE Basic Loading (No Export)")
 try:
     model = YOLOEWrapper(
         model_path=YOLOE_MODEL,
@@ -259,7 +307,7 @@ except Exception as e:
     logger.error(f"✗ Failed to load YOLOE model: {e}")
 
 
-print_test_header(8, "YOLOE Single Image Prediction")
+print_test_header(9, "YOLOE Single Image Prediction")
 try:
     model = YOLOEWrapper(
         model_path=YOLOE_MODEL,
@@ -290,7 +338,7 @@ except Exception as e:
     logger.error(f"✗ YOLOE prediction failed: {e}", traceback=True)
 
 
-print_test_header(9, "YOLOE Batch Prediction (5 images, batch_size=2)")
+print_test_header(10, "YOLOE Batch Prediction (5 images, batch_size=2)")
 try:
     model = YOLOEWrapper(
         model_path=YOLOE_MODEL,
@@ -310,7 +358,7 @@ except Exception as e:
     logger.error(f"✗ YOLOE batch prediction failed: {e}", traceback=True)
 
 
-print_test_header(10, "YOLOE ONNX Export")
+print_test_header(11, "YOLOE ONNX Export")
 try:
     # Clean up any existing ONNX file
     onnx_path = Path(YOLOE_MODEL).with_suffix('.onnx')
@@ -348,7 +396,7 @@ except Exception as e:
 # SECTION 4: EXPORT FORMAT TESTS
 # =============================================================================
 
-print_test_header(11, "Export Format Mappings")
+print_test_header(12, "Export Format Mappings")
 try:
     from transformsai_ai_core.yolo_wrapper import EXPORT_FORMAT_MAP
     

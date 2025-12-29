@@ -12,3 +12,5 @@ logs
 
 # Models
 *.pt
+*.onnx
+*.engine
