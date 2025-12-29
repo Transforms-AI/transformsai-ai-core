@@ -782,6 +782,7 @@ class DataUploader:
         self, 
         sn: str, 
         timestamp: str,
+        camera_type: Optional[str] = None,
         live_url: Optional[str] = None,
         method: str = "POST",
         extra_data: Optional[Dict] = {},
@@ -798,6 +799,9 @@ class DataUploader:
             "hostname": self.hostname,
             "source": self.source
         }
+        
+        if camera_type:
+            heartbeat_data["type"] = camera_type
         
         heartbeat_data.update(extra_data)
         
