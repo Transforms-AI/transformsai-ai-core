@@ -8,7 +8,10 @@ Install the library directly from the Git repository:
 
 ```bash
 # Basic installation
-pip install git+https://github.com/yourusername/transformsai-ai-core.git
+uv add git+https://github.com/yourusername/transformsai-ai-core.git
+
+# Install with YOLO/YOLOE support (includes ultralytics and torch)
+uv add "git+https://github.com/yourusername/transformsai-ai-core.git#egg=transformsai-ai-core[all]"
 ```
 
 ## Core Components
@@ -18,6 +21,7 @@ pip install git+https://github.com/yourusername/transformsai-ai-core.git
 *   **`DataUploader`**: Asynchronous, thread-safe HTTP client with a persistent cache, automatic retries, and heartbeat functionality.
 *   **`central_logger`**: A centralized, singleton logger that provides colored console output and rotating file logs out of the box.
 *   **`config_loader`**: Centralized configuration management with structured schemas and dynamic freeform fields for project-specific settings.
+*   **`yolo_wrapper`**: Ultralytics YOLO and YOLOE wrapper to have auto batching and export options.
 
 ---
 
@@ -288,6 +292,128 @@ uploader.send_heartbeat(
 time.sleep(2) 
 uploader.shutdown()
 ```
+
+### 6. YOLO/YOLOE Wrappers with Auto-Export and Batching
+
+*Available when installed with `[all]` extras.*
+
+The library provides wrapper classes for ultralytics YOLO and YOLOE models with automatic model export to optimized formats (ONNX, TensorRT, etc.) and custom sequential batching for controlled memory usage.
+
+#### Config-Based Usage
+
+```yaml
+# config.yaml
+advanced:
+  models:
+    yolo11n:
+      type: "person-det"
+      path: "/models/yolo11n.pt"
+      load_options:
+        lib_type: "YOLO"  # or "YOLOE"
+        task: "detect"
+      export: true  # Enable auto-export
+      export_options:
+        format: "onnx"  # Export to ONNX format
+        half: false
+        dynamic: true
+        imgsz: 640
+      batch: 8  # Process 8 images per batch
+```
+
+```python
+from transformsai_ai_core import YOLOWrapper, YOLOEWrapper, get_logger
+from transformsai_ai_core.config_loader import load_config
+
+logger = get_logger(__name__)
+
+# Load config
+config = load_config("config.yaml")
+model_config = config["advanced"]["models"]["yolo11n"]
+
+# Initialize wrapper from config
+model = YOLOWrapper(
+    model_path=model_config["path"],
+    export=model_config.get("export", False),
+    export_options=model_config.get("export_options", {}),
+    batch_size=model_config.get("batch", 1)
+)
+
+# The wrapper automatically:
+# 1. Checks if yolo11n.onnx exists
+# 2. Exports to ONNX if not found
+# 3. Loads the exported model (falls back to .pt on error)
+
+# Single image prediction
+results = model.predict("image.jpg")
+
+# Multiple images with sequential batching
+# Chunks into batches of 8, processes sequentially, returns all results
+image_paths = [f"image_{i}.jpg" for i in range(25)]
+results = model.predict(image_paths)  # Returns list of 25 Results objects
+
+# Process results (same as ultralytics)
+for r in results:
+    boxes = r.boxes.xyxy  # Bounding boxes
+    conf = r.boxes.conf   # Confidence scores
+    cls = r.boxes.cls     # Class indices
+    logger.info(f"Detected {len(boxes)} objects in {r.path}")
+```
+
+#### Direct Usage
+
+```python
+from transformsai_ai_core import YOLOWrapper, YOLOEWrapper
+
+# YOLO wrapper with ONNX export
+yolo_model = YOLOWrapper(
+    model_path="yolo11n.pt",
+    export=True,
+    export_options={
+        "format": "onnx",
+        "half": False,
+        "dynamic": True,
+        "imgsz": 640
+    },
+    batch_size=4
+)
+
+# YOLOE wrapper with TensorRT export (for NVIDIA GPUs)
+yoloe_model = YOLOEWrapper(
+    model_path="yoloe-11l-seg.pt",
+    export=True,
+    export_options={
+        "format": "engine",  # TensorRT
+        "half": True,        # FP16 optimization
+        "workspace": 4       # 4GB workspace
+    },
+    batch_size=8
+)
+
+# YOLOE with text prompts (specific to YOLOE)
+names = ["person", "car"]
+yoloe_model.set_classes(names, yoloe_model.get_text_pe(names))
+results = yoloe_model.predict("street.jpg")
+
+# Access both original and exported model paths
+print(f"Original: {yolo_model.original_model_path}")
+print(f"Exported: {yolo_model.exported_model_path}")
+```
+
+#### Supported Export Formats
+
+The wrappers support all ultralytics export formats:
+- **ONNX** (`.onnx`) - Cross-platform
+- **TensorRT** (`.engine`) - NVIDIA GPU optimization
+- **TorchScript** (`.torchscript`) - PyTorch optimized
+- **CoreML** (`.mlpackage`) - Apple devices
+- **OpenVINO** (`_openvino_model/`) - Intel hardware
+- **TFLite** (`.tflite`) - Mobile/edge devices
+- And more: EdgeTPU, NCNN, RKNN, MNN, Paddle
+
+The wrapper automatically:
+- Checks if exported model exists using format-specific naming
+- Exports only if missing (cached for subsequent runs)
+- Loads exported model with automatic fallback to original on error
 
 ---
 ## Putting It All Together: A Complete Example

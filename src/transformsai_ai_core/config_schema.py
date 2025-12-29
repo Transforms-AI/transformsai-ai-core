@@ -60,8 +60,8 @@ class ModelConfig(BaseModel):
     batch: int = Field(default=1, description="Batch size for inference")
     path: str = Field(default="", description="Local path, auto-populated after download")
     load_options: LoadOptions = Field(default_factory=LoadOptions, description="Model loading parameters")
+    export: bool = Field(default=False, description="Enable automatic model export")
     export_options: dict[str, Any] = Field(default_factory=dict, description="Freeform export options")
-
 
 # ==============================================================================
 # Datasend Configuration

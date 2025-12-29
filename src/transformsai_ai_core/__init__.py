@@ -35,6 +35,15 @@ from .config_loader import (
     get_freeform_fields,
 )
 
+# Optional YOLO/YOLOE wrappers (requires ultralytics)
+try:
+    from .yolo_wrapper import YOLOWrapper, YOLOEWrapper
+    YOLO_AVAILABLE = True
+except ImportError:
+    YOLO_AVAILABLE = False
+    YOLOWrapper = None
+    YOLOEWrapper = None
+
 __all__ = [
     # Existing
     'get_logger',
@@ -61,4 +70,8 @@ __all__ = [
     'download_model',
     'get_formatted_fields',
     'get_freeform_fields',
+    # YOLO wrappers (optional)
+    'YOLOWrapper',
+    'YOLOEWrapper',
+    'YOLO_AVAILABLE',
 ]
