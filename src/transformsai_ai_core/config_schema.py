@@ -33,12 +33,21 @@ class RtspSource(BaseModel):
     path: str = Field(default="/Streaming/Channels/101", description="RTSP stream path")
 
 
+class CaptureSettings(BaseModel):
+    """Video capture optimization settings."""
+    
+    buffer_size: int = Field(default=1, description="OpenCV buffer size (1 = minimal lag)")
+    opencv_backend: str | None = Field(default=None, description="Backend: 'auto', 'ffmpeg', 'gstreamer', None")
+    max_frame_age_ms: int | None = Field(default=None, description="Drop frames older than this (ms)")
+
+
 class CameraConfig(BaseModel):
     """Single camera configuration. SN is auto-generated at runtime."""
 
     local: bool = Field(default=False, description="Use local file instead of RTSP stream")
     local_source: str = Field(default="", description="Path to local video file")
     rtsp_source: RtspSource = Field(default_factory=RtspSource, description="RTSP connection settings")
+    capture: CaptureSettings = Field(default_factory=CaptureSettings, description="Capture optimization settings")
     settings: dict[str, Any] = Field(default_factory=dict, description="Freeform per-camera settings")
 
 
@@ -79,12 +88,21 @@ class DatasendConfig(BaseModel):
 # ==============================================================================
 # Livestream Configuration
 # ==============================================================================
+class StreamEncoderSettings(BaseModel):
+    """FFmpeg encoder settings for resource optimization."""
+    
+    preset: str = Field(default="ultrafast", description="Encoder preset: ultrafast, fast, medium, slow")
+    codec: str = Field(default="copy", description="Codec: 'copy' (no re-encode) or 'libx264'")
+    queue_size: int = Field(default=2, description="Async frame queue depth (0 = sync)")
+
+
 class LivestreamConfig(BaseModel):
     """MediaMTX RTSP streaming settings."""
 
     enabled: bool = Field(default=True, description="Master switch for livestreaming")
     mediamtx_ip: str = Field(default="localhost", description="MediaMTX server IP")
     rtsp_port: int = Field(default=8554, description="MediaMTX RTSP port")
+    encoder: StreamEncoderSettings = Field(default_factory=StreamEncoderSettings, description="Encoder optimization")
     settings: dict[str, Any] = Field(default_factory=dict, description="Freeform settings (fps, draw_annotations, etc.)")
 
 

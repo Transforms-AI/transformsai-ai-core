@@ -7,6 +7,7 @@ import os
 import psutil
 import socket
 import re
+import queue
 from threading import Lock
 from collections import deque
 from .central_logger import get_logger
@@ -23,7 +24,8 @@ class MediaMTXStreamer:
     
     def __init__(self, mediamtx_ip, rtsp_port, camera_sn_id, fps=30, 
                  frame_width=1920, frame_height=1080, bitrate="1500k",
-                 debug_log_interval=60.0):
+                 debug_log_interval=60.0, encoder_preset="ultrafast",
+                 encoder_codec="copy", stream_queue_size=2):
         self.mediamtx_ip = mediamtx_ip
         self.rtsp_port = rtsp_port
         self.camera_sn_id = camera_sn_id
@@ -32,6 +34,11 @@ class MediaMTXStreamer:
         self.frame_height = frame_height
         self.bitrate = bitrate
         self.webrtc_port = 8889  # Default MediaMTX WebRTC port
+        
+        # Encoder settings for resource optimization
+        self.encoder_preset = encoder_preset  # ultrafast, fast, medium, etc.
+        self.encoder_codec = encoder_codec  # 'copy' to avoid re-encoding, or 'libx264'
+        self.stream_queue_size = stream_queue_size  # Async queue depth
         
         # Setup logging using central logger
         self.logger = get_logger(self)
@@ -46,6 +53,11 @@ class MediaMTXStreamer:
         self.restart_count = 0
         self.last_restart_time = 0
         
+        # Async frame queue to decouple encoding from processing
+        self._frame_queue = None
+        self._writer_thread = None
+        self._writer_stop_event = threading.Event()
+        
         # Performance tracking for debug logging
         self.last_debug_log_time = 0
         self.debug_log_interval = debug_log_interval
@@ -53,7 +65,7 @@ class MediaMTXStreamer:
         self.frames_since_last_log = 0
         self.last_frame_time = 0
         
-        # Enhanced performance metrics
+        # Performance metrics
         self.frame_write_times = deque(maxlen=100)  # Last 100 frame write times
         self.frame_resize_times = deque(maxlen=100)  # Last 100 resize times
         self.network_ping_times = deque(maxlen=20)  # Last 20 ping times
@@ -104,7 +116,7 @@ class MediaMTXStreamer:
             return False
         
         try:
-            # Optimized FFmpeg command with better diagnostics
+            # Build FFmpeg command with configurable codec/preset
             ffmpeg_cmd = [
                 'ffmpeg', '-y',
                 '-f', 'rawvideo',
@@ -113,8 +125,8 @@ class MediaMTXStreamer:
                 '-s', f'{self.frame_width}x{self.frame_height}',
                 '-r', str(self.fps),
                 '-i', '-',
-                '-c:v', 'libx264',
-                '-preset', 'fast',
+                '-c:v', 'libx264',  # TODO: Make codec configurable, copy isn't tested
+                '-preset', self.encoder_preset,
                 '-tune', 'zerolatency',
                 '-profile:v', 'main',
                 '-pix_fmt', 'yuv420p',
@@ -151,6 +163,18 @@ class MediaMTXStreamer:
                 self.restart_count += 1
                 self.last_restart_time = current_time
                 
+                # Start async frame writer thread
+                if self.stream_queue_size > 0:
+                    self._frame_queue = queue.Queue(maxsize=self.stream_queue_size)
+                    self._writer_stop_event.clear()
+                    self._writer_thread = threading.Thread(
+                        target=self._frame_writer_loop,
+                        name=f"MediaMTX_Writer_{self.camera_sn_id}",
+                        daemon=True
+                    )
+                    self._writer_thread.start()
+                    self.logger.info(f"[Stream] Async writer thread started (queue size: {self.stream_queue_size})")
+                
                 # Print stream information
                 self._print_stream_info()
                 
@@ -181,6 +205,12 @@ class MediaMTXStreamer:
             return
         
         self.is_streaming = False
+        
+        # Stop async writer thread
+        if self._writer_thread and self._writer_thread.is_alive():
+            self._writer_stop_event.set()
+            self._writer_thread.join(timeout=2.0)
+            self.logger.info("[Stream] Async writer thread stopped")
         
         if self.ffmpeg_process:
             try:
@@ -237,46 +267,50 @@ class MediaMTXStreamer:
             return False
         
         try:
-            with self.frame_lock:
-                # Track resize timing
+            # Resize if needed
+            if frame.shape[:2] != (self.frame_height, self.frame_width):
                 resize_start_time = time.time()
-                
-                # Resize if needed
-                if frame.shape[:2] != (self.frame_height, self.frame_width):
-                    frame = cv2.resize(frame, (self.frame_width, self.frame_height))
-                
+                frame = cv2.resize(frame, (self.frame_width, self.frame_height))
                 resize_time = time.time() - resize_start_time
                 self.frame_resize_times.append(resize_time)
-                
-                # Track frame write timing
-                write_start_time = time.time()
-                
-                # Write frame
-                self.ffmpeg_process.stdin.write(frame.tobytes())
-                self.ffmpeg_process.stdin.flush()
-                
-                write_time = time.time() - write_start_time
-                self.frame_write_times.append(write_time)
-                
-                # Check for slow writes (potential bottleneck)
-                if write_time > self.processing_bottleneck_threshold:
-                    self.buffer_full_count += 1
-                
-                # Update frame counters
-                self.frame_count += 1
-                self.frames_since_last_log += 1
-                self.last_frame_time = time.time()
-                
-                # Periodic debug logging
-                current_time = time.time()
-                if current_time - self.last_debug_log_time >= self.debug_log_interval:
-                    self._log_performance_debug()
-                
-                # Periodic network check
-                if current_time - self.last_network_check >= self.network_check_interval:
-                    self._check_network_health()
-                
-                return True
+            
+            # Use async queue if enabled, else write synchronously
+            if self._frame_queue:
+                try:
+                    # Non-blocking put: drop frame if queue full (backpressure)
+                    self._frame_queue.put_nowait(frame)
+                    self.frame_count += 1
+                    self.frames_since_last_log += 1
+                except:
+                    self.dropped_frames += 1
+                    return False
+            else:
+                # Synchronous write (fallback)
+                with self.frame_lock:
+                    write_start_time = time.time()
+                    self.ffmpeg_process.stdin.write(frame.tobytes())
+                    self.ffmpeg_process.stdin.flush()
+                    write_time = time.time() - write_start_time
+                    self.frame_write_times.append(write_time)
+                    
+                    if write_time > self.processing_bottleneck_threshold:
+                        self.buffer_full_count += 1
+                    
+                    self.frame_count += 1
+                    self.frames_since_last_log += 1
+            
+            self.last_frame_time = time.time()
+            
+            # Periodic debug logging
+            current_time = time.time()
+            if current_time - self.last_debug_log_time >= self.debug_log_interval:
+                self._log_performance_debug()
+            
+            # Periodic network check
+            if current_time - self.last_network_check >= self.network_check_interval:
+                self._check_network_health()
+            
+            return True
                 
         except (BrokenPipeError, OSError) as e:
             self.logger.warning(f"[Stream] Pipe error: {e}")
@@ -393,6 +427,32 @@ class MediaMTXStreamer:
         self.buffer_full_count = 0  # Reset buffer count
         self.dropped_frames = 0     # Reset dropped frames count
 
+    def _frame_writer_loop(self):
+        """Async frame writer thread - decouples encoding from main processing."""
+        self.logger.info("[Stream] Frame writer thread started")
+        
+        while not self._writer_stop_event.is_set():
+            try:
+                # Get frame from queue with timeout
+                frame = self._frame_queue.get(timeout=0.1)
+                
+                # Write to FFmpeg stdin
+                with self.frame_lock:
+                    write_start_time = time.time()
+                    self.ffmpeg_process.stdin.write(frame.tobytes())
+                    self.ffmpeg_process.stdin.flush()
+                    write_time = time.time() - write_start_time
+                    
+                    self.frame_write_times.append(write_time)
+                    if write_time > self.processing_bottleneck_threshold:
+                        self.buffer_full_count += 1
+                        
+            except Exception:
+                # Queue empty or write error - continue loop
+                continue
+        
+        self.logger.info("[Stream] Frame writer thread stopped")
+    
     def is_active(self):
         """Quick health check."""
         return (self.is_streaming and 

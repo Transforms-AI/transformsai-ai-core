@@ -26,7 +26,10 @@ class VideoCaptureAsync:
         driver=None,
         heartbeat_config=None, 
         auto_restart_on_fail=False, 
-        restart_delay=30.0
+        restart_delay=30.0,
+        buffer_size=1,  # Minimize OpenCV internal buffer (critical for HEVC)
+        opencv_backend="auto",  # 'auto', 'ffmpeg', 'gstreamer', or None
+        max_frame_age_ms=100  # Drop frames older than this (ms) (None = no limit)
     ):
         self.src = src
         self.width = width # Currently does not resize frames, but can be used for future enhancements
@@ -37,17 +40,24 @@ class VideoCaptureAsync:
 
         self.auto_restart_on_fail = auto_restart_on_fail
         self.restart_delay = restart_delay
+        
+        # HEVC optimization parameters
+        self.buffer_size = buffer_size
+        self.opencv_backend = opencv_backend
+        self.max_frame_age_ms = max_frame_age_ms
 
         self.cap = None
         self.started = False
         self._grabbed = False
         self._frame = None
+        self._frame_timestamp = 0  # Track when frame was captured
         self._read_lock = threading.Lock()
         self._thread = None
         self._fps = 30.0
         self._last_frame_time = 0
         self._frame_count = 0
         self._stop_event = threading.Event()
+        self._dropped_frames = 0  # Track frames dropped due to age
 
         self._heartbeat_config = heartbeat_config or {}
         self._data_uploader = None
@@ -116,13 +126,26 @@ class VideoCaptureAsync:
                 self.cap = None
             
             self.logger.debug(f"[{self.src}] Attempting to open capture source.")
-            if self.driver is None:
-                self.cap = cv2.VideoCapture(self.src)
+           
+            # Select OpenCV backend for optimal HEVC decoding
+            backend = cv2.CAP_ANY  # Default
+            if self.opencv_backend == 'ffmpeg':
+                backend = cv2.CAP_FFMPEG
+            elif self.opencv_backend == 'gstreamer':
+                backend = cv2.CAP_GSTREAMER
+            
+            if self.opencv_backend and self.opencv_backend != "auto":
+                self.cap = cv2.VideoCapture(self.src, backend)
             else:
-                self.cap = cv2.VideoCapture(self.src, self.driver)
+                self.cap = cv2.VideoCapture(self.src)
 
             if not self.cap.isOpened():
                 raise RuntimeError(f"Could not open video source: {self.src}")
+            
+            # Critical: Minimize buffer to prevent HEVC frame accumulation
+            if self.buffer_size is not None:
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, self.buffer_size)
+                self.logger.debug(f"[{self.src}] Set buffer size to {self.buffer_size}")
 
             fps = self.cap.get(cv2.CAP_PROP_FPS)
             if fps is not None and fps > 0:
@@ -311,7 +334,7 @@ class VideoCaptureAsync:
                         with self._read_lock:
                             self._grabbed = True
                             self._frame = frame
-                            
+                            self._frame_timestamp = time.time()
 
             except cv2.error as e:
                 error_msg = f"OpenCV error during capture from {self.src}: {e}"
