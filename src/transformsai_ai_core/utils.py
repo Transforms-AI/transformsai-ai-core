@@ -42,7 +42,7 @@ def resize_frame(frame, max_width=UPLOAD_IMAGE_MAX_WIDTH_DEFAULT):
         # No resizing needed
         return frame
 
-def mat_to_response(frame, max_width=UPLOAD_IMAGE_MAX_WIDTH_DEFAULT, jpeg_quality=JPEG_DEFAULT_QUALITY, filename="image.jpg", timestamp=None):
+def mat_to_response(frame, max_width=UPLOAD_IMAGE_MAX_WIDTH_DEFAULT, jpeg_quality=JPEG_DEFAULT_QUALITY, filename="image.jpg", timestamp=None, add_timestamp=False):
     """
     Resizes (if necessary) and encodes an OpenCV frame (NumPy array)
     to JPEG bytes in memory with a specified quality.
@@ -59,7 +59,10 @@ def mat_to_response(frame, max_width=UPLOAD_IMAGE_MAX_WIDTH_DEFAULT, jpeg_qualit
     """
     try:
         # 0. Replate timestamp
-        frame = hide_camera_timestamp_and_add_current_time(frame, timestamp=timestamp)
+        if add_timestamp:
+            if timestamp is None:
+                timestamp = time.time()
+            frame = hide_camera_timestamp_and_add_current_time(frame, timestamp=timestamp)
         
         # 1. Resize the frame
         resized_frame = resize_frame(frame, max_width)

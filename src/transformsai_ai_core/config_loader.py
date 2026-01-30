@@ -15,6 +15,11 @@ import yaml
 
 from .config_schema import AppConfig, CameraConfig
 
+# ==============================================================================
+# Model Download Configuration
+# ==============================================================================
+# Set this to your model download API base URL
+DOWNLOAD_BASE_URL = ""
 
 # ==============================================================================
 # RTSP URL Builder
@@ -69,35 +74,124 @@ def get_model_dir(base_dir: Path, model_name: str) -> Path:
 
 def download_model(
     model_name: str,
+    model_config: dict[str, Any],
     base_dir: Path,
-    api_url: str = "http://localhost:8000/api/models/download",
+    download_base_url: str,
 ) -> Path:
     """
-    Download model from model server and return local path.
+    Download model from API endpoint using gdown for Google Drive links.
 
-    Placeholder implementation - actual download logic to be added.
+    Attempts to download via model_key or model_type. On failure, returns
+    fallback path to allow graceful continuation.
 
     Args:
         model_name: Model identifier
+        model_config: Model configuration dict with download_key/type fields
         base_dir: Project root directory
-        api_url: Model server API URL
+        download_base_url: API base URL for model downloads
 
     Returns:
-        Path to downloaded model file
+        Path to downloaded model file or directory
     """
+    import os
+    import shutil
+    import zipfile
+    import requests
+    import gdown
+    from .central_logger import get_logger
+
+    logger = get_logger()
     model_dir = get_model_dir(base_dir, model_name)
     model_dir.mkdir(parents=True, exist_ok=True)
+    fallback_path = model_dir / f"{model_name}"
 
-    model_path = model_dir / f"{model_name}"
+    if not download_base_url:
+        logger.warning(f"No download_base_url set, skipping download for {model_name}")
+        return fallback_path
 
-    # TODO: Implement actual download
-    # url = f"{api_url}?name={model_name}&backend={backend}"
-    # response = requests.get(url, stream=True)
-    # with open(model_path, 'wb') as f:
-    #     for chunk in response.iter_content(chunk_size=8192):
-    #         f.write(chunk)
+    try:
+        # Determine API endpoint based on download_key or type
+        download_key = model_config.get("download_key", "")
+        model_type = model_config.get("type", "")
 
-    return model_path
+        if download_key:
+            endpoint = f"{download_base_url}/models/download/key/{download_key}"
+            logger.info(f"Fetching model by key: {download_key}")
+            response = requests.get(endpoint, timeout=30)
+        elif model_type:
+            endpoint = f"{download_base_url}/models/download/latest"
+            params = {"model_type_name": model_type}
+            logger.info(f"Fetching latest model for type: {model_type}")
+            response = requests.get(endpoint, params=params, timeout=30)
+        else:
+            logger.error(f"No download_key or type specified for model {model_name}")
+            return fallback_path
+
+        response.raise_for_status()
+        data = response.json()
+
+        # Extract download URL from API response
+        download_url = data.get("download_url") or data.get("data", {}).get("download_url")
+        if not download_url:
+            logger.error(f"No download_url in API response for {model_name}")
+            return fallback_path
+
+        logger.info(f"Downloading model '{model_name}' from {download_url}")
+
+        # Download using gdown (handles Google Drive links)
+        downloaded_path = gdown.download(download_url, output=None, quiet=False, fuzzy=True)
+        if not downloaded_path:
+            logger.error(f"gdown failed to download {model_name}")
+            return fallback_path
+
+        # Move downloaded file to models directory
+        filename = Path(downloaded_path).name
+        target_path = model_dir / filename
+
+        if target_path.exists():
+            if target_path.is_dir():
+                shutil.rmtree(target_path)
+            else:
+                os.remove(target_path)
+
+        shutil.move(downloaded_path, target_path)
+        logger.info(f"File downloaded to: {target_path}")
+
+        final_path = target_path
+
+        # Extract if zip file
+        if target_path.suffix.lower() == ".zip":
+            logger.info(f"Extracting zip file: {filename}")
+            try:
+                with zipfile.ZipFile(target_path, "r") as zip_ref:
+                    zip_ref.extractall(model_dir)
+
+                os.remove(target_path)
+
+                # Scan for first subfolder in extracted content
+                extracted_items = list(model_dir.iterdir())
+                subfolders = [item for item in extracted_items if item.is_dir()]
+
+                if subfolders:
+                    final_path = subfolders[0]
+                    logger.info(f"Extracted to folder: {final_path}")
+                else:
+                    # No subfolder, files extracted directly
+                    final_path = model_dir
+                    logger.info(f"Files extracted to: {final_path}")
+
+            except zipfile.BadZipFile:
+                logger.error(f"Downloaded file is not a valid zip: {target_path}")
+                return fallback_path
+
+        return final_path
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API request failed for {model_name}: {str(e)}")
+        return fallback_path
+    except Exception as e:
+        logger.error(f"Error downloading model {model_name}: {str(e)}")
+        return fallback_path
 
 
 def resolve_model_paths(config: dict[str, Any], base_dir: Path, download: bool = False) -> dict[str, Any]:
@@ -120,14 +214,14 @@ def resolve_model_paths(config: dict[str, Any], base_dir: Path, download: bool =
 
         model_dir = get_model_dir(base_dir, model_name)
         expected_path = model_dir / f"{model_name}"
-        # NOTE: We will assume extenstion is pt if none given, and we will provide extension
+        # NOTE: We will assume extension is pt if none given, and we will provide extension
         # if its something specific like .rknn
         # TODO: Analyze and find if will cause future issues
 
         if expected_path.exists():
             model["path"] = str(expected_path)
         elif download:
-            downloaded_path = download_model(model_name, base_dir)
+            downloaded_path = download_model(model_name, model, base_dir, DOWNLOAD_BASE_URL)
             model["path"] = str(downloaded_path)
 
     return config

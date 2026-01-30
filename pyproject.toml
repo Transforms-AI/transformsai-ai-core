@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transformsai-ai-core"
-version = "2.2.0"
+version = "2.2.1"
 description = "TransformsAI Core Library - Utilities for AI vision applications"
 readme = "README.md"
 authors = [
@@ -38,7 +38,8 @@ dependencies = [
     "python-dateutil>=2.8.0",
     "pytz>=2021.1",
     "loguru>=0.7.3",
-    "pydantic>=2.12.0"
+    "pydantic>=2.12.0",
+    "gdown>=5.0.0",
 ]
 
 [project.optional-dependencies]
@@ -112,3 +113,6 @@ conflicts = [
 
 [tool.uv.sources]
 clip = { git = "https://github.com/ultralytics/CLIP.git", rev = "643beff3883b5720d94b6b9c9eca12fa9fb72fb1" }
+
+[project.scripts]
+transformsaicore = "transformsai_ai_core.main:main"
