@@ -60,7 +60,7 @@ rknn = [
     "onnx",
     "onnxruntime",
     "onnxslim",
-    "rknn-toolkit-lite2>=2.3.2; sys_platform == 'aarch64'",
+    "rknn-toolkit-lite2>=2.3.2; sys_platform != 'aarch64'",
     # "rknn-toolkit2>=2.3.2; sys_platform != 'darwin'", Removed, only needed for export, isn't supported on aarch
     "torch", 
     "torchvision", 
@@ -85,7 +85,7 @@ all = [
     "onnxruntime-gpu",
     "onnxslim",
     "tensorrt-cu12>=10.13.3.9",
-    "rknn-toolkit-lite2>=2.3.2; sys_platform == 'aarch64'",
+    # "rknn-toolkit-lite2>=2.3.2; sys_platform == 'aarch64'",
     "ultralytics",
     "torch", 
     "torchvision",
