@@ -61,7 +61,7 @@ rknn = [
     "onnxruntime",
     "onnxslim",
     "rknn-toolkit-lite2>=2.3.2; sys_platform == 'aarch64'",
-    "rknn-toolkit2>=2.3.2; sys_platform != 'darwin'",
+    # "rknn-toolkit2>=2.3.2; sys_platform != 'darwin'", Removed, only needed for export, isn't supported on aarch
     "torch", 
     "torchvision", 
     "ultralytics",
