@@ -208,92 +208,180 @@ def hide_camera_timestamp_and_add_current_time(
 
     return output_frame
 
-def draw_boxes(frame, boxes, classes, class_to_label, confidences=None):
-    """
-    Draws bounding boxes with labels and optional confidences on an image.
+# def draw_boxes(frame, boxes, classes, class_to_label, confidences=None):
+#     """
+#     Draws bounding boxes with labels and optional confidences on an image.
 
-    Args:
-        frame: The image (as a NumPy array) on which to draw.
-        boxes: A list of bounding boxes, each represented as [x_min, y_min, x_max, y_max].
-        classes: A list of class indices corresponding to each box.
-        class_to_label: A dictionary mapping class indices to label names.
-        confidences: (Optional) A list of confidence scores corresponding to each box.
-    """
+#     Args:
+#         frame: The image (as a NumPy array) on which to draw.
+#         boxes: A list of bounding boxes, each represented as [x_min, y_min, x_max, y_max].
+#         classes: A list of class indices corresponding to each box.
+#         class_to_label: A dictionary mapping class indices to label names.
+#         confidences: (Optional) A list of confidence scores corresponding to each box.
+#     """
 
-    frame_height, frame_width = frame.shape[:2]
+#     frame_height, frame_width = frame.shape[:2]
 
-    # Calculate text size relative to image width
-    text_size = max(1, int(frame_width / 1000))  # Adjust 500 for desired scaling
-    text_thickness = max(1, int(frame_width / 1000))
+#     # Calculate text size relative to image width
+#     text_size = max(1, int(frame_width / 1000))  # Adjust 500 for desired scaling
+#     text_thickness = max(1, int(frame_width / 1000))
 
-    # Generate a color palette for unique classes
-    unique_classes = sorted(list(set(classes)))
-    color_palette = generate_color_palette(len(unique_classes))
-    class_to_color = {cls: color_palette[i] for i, cls in enumerate(unique_classes)}
+#     # Generate a color palette for unique classes
+#     unique_classes = sorted(list(set(classes)))
+#     color_palette = generate_color_palette(len(unique_classes))
+#     class_to_color = {cls: color_palette[i] for i, cls in enumerate(unique_classes)}
 
+#     for i, box in enumerate(boxes):
+#         x_min, y_min, x_max, y_max = [int(coord) for coord in box]
+#         class_index = classes[i]
+#         label = class_to_label[class_index]
+#         color = class_to_color[class_index]
+
+#         # Add confidence if available
+#         if confidences is not None and len(confidences) > 0:
+#             confidence = confidences[i]
+#             label = f"{label}: {confidence:.2f}"
+
+#         # Draw the bounding box
+#         cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), color, 2)
+
+#         # Calculate text background size
+#         (text_width, text_height), baseline = cv2.getTextSize(
+#             label, cv2.FONT_HERSHEY_SIMPLEX, text_size, text_thickness
+#         )
+
+#         # Draw text background
+#         cv2.rectangle(
+#             frame,
+#             (x_min, y_min - text_height - baseline),
+#             (x_min + text_width, y_min),
+#             color,
+#             -1,
+#         )
+
+#         # Draw the label text
+#         cv2.putText(
+#             frame,
+#             label,
+#             (x_min, y_min - baseline),
+#             cv2.FONT_HERSHEY_SIMPLEX,
+#             text_size,
+#             (0, 0, 0),  # Black text
+#             text_thickness,
+#             cv2.LINE_AA,
+#         )
+
+#     return frame
+
+# def generate_color_palette(num_colors):
+#     """
+#     Generates a list of visually distinct colors.
+
+#     Args:
+#         num_colors: The number of colors to generate.
+
+#     Returns:
+#         A list of (B, G, R) tuples representing the colors.
+#     """
+
+#     if num_colors == 0:
+#         return []  # Return an empty list if no colors are requested
+
+#     # Use HSV color space for better distinct color generation
+#     hsv_colors = np.array(
+#         [[i / num_colors, 1, 1] for i in range(num_colors)], dtype=np.float32
+#     )
+#     rgb_colors = cv2.cvtColor(np.array([hsv_colors]), cv2.COLOR_HSV2BGR)[0]
+
+#     # Convert to (B, G, R) tuples and scale to 0-255
+#     color_palette = [(int(b * 255), int(g * 255), int(r * 255)) for b, g, r in rgb_colors]
+
+#     return color_palette
+
+PALETTE = [
+    (0, 0, 255), (0, 255, 0), (255, 0, 0), (0, 255, 255), (255, 0, 255),
+    (255, 255, 0), (0, 165, 255), (128, 0, 128), (0, 255, 127), (128, 128, 0),
+    (127, 255, 212), (255, 105, 180), (75, 0, 130), (255, 140, 0), (0, 128, 128)
+]
+
+def get_legend_layout(classes, class_to_label, text_scale, dot_size):
+    """Helper to calculate legend dimensions shared by all functions."""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    text_thickness = max(1, int(text_scale * 2))
+    padding, line_spacing = 15, 10
+    max_text_w, total_text_h, rows = 0, 0, []
+    
+    unique_class_indices = sorted(list(set(classes)))
+
+    for cls_idx in unique_class_indices:
+        label = class_to_label.get(cls_idx, f"Class {cls_idx}")
+        (t_w, t_h), _ = cv2.getTextSize(label, font, text_scale, text_thickness)
+        max_text_w = max(max_text_w, t_w)
+        total_text_h += t_h + line_spacing
+        rows.append({'label': label, 'color': PALETTE[cls_idx % len(PALETTE)], 'h': t_h})
+
+    legend_w = max_text_w + (dot_size * 2) + (padding * 3)
+    legend_h = total_text_h + padding
+    return legend_w, legend_h, rows, padding, line_spacing, font, text_thickness
+
+def draw_common_elements(frame, boxes, classes, line_thickness):
+    """Draws the boxes (common to all versions)."""
     for i, box in enumerate(boxes):
-        x_min, y_min, x_max, y_max = [int(coord) for coord in box]
-        class_index = classes[i]
-        label = class_to_label[class_index]
-        color = class_to_color[class_index]
+        x_min, y_min, x_max, y_max = [int(c) for c in box]
+        color = PALETTE[classes[i] % len(PALETTE)]
+        cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), color, line_thickness)
 
-        # Add confidence if available
-        if confidences is not None and len(confidences) > 0:
-            confidence = confidences[i]
-            label = f"{label}: {confidence:.2f}"
+def draw_boxes(frame, boxes, classes, class_to_label, confidences=None, 
+                       line_thickness=2, legend_pos='top-left', legend_opacity=0.6, 
+                       legend_corner_radius=15, text_scale=0.6, dot_size=6):
+    
+    frame_h, frame_w = frame.shape[:2]
+    draw_common_elements(frame, boxes, classes, line_thickness)
+    if not classes: return frame
 
-        # Draw the bounding box
-        cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), color, 2)
+    l_w, l_h, rows, pad, space, font, thick = get_legend_layout(classes, class_to_label, text_scale, dot_size)
+    
+    margin = 20
+    if legend_pos == 'top-left': lx, ly = margin, margin
+    elif legend_pos == 'top-right': lx, ly = frame_w - l_w - margin, margin
+    elif legend_pos == 'bottom-left': lx, ly = margin, frame_h - l_h - margin
+    else: lx, ly = frame_w - l_w - margin, frame_h - l_h - margin
+    lx, ly = max(0, min(lx, frame_w - l_w)), max(0, min(ly, frame_h - l_h))
+    ex, ey = lx + l_w, ly + l_h
 
-        # Calculate text background size
-        (text_width, text_height), baseline = cv2.getTextSize(
-            label, cv2.FONT_HERSHEY_SIMPLEX, text_size, text_thickness
-        )
+    # --- EXTREME: Downscale -> Blur -> Upscale ---
+    roi = frame[ly:ey, lx:ex]
+    
+    # 1. Downscale by 4x (0.25)
+    small_roi = cv2.resize(roi, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_NEAREST)
+    
+    # 2. Blur small image (Tiny kernel is sufficient now)
+    blurred_small = cv2.GaussianBlur(small_roi, (5, 5), 0)
+    
+    # 3. Upscale back
+    blurred_roi = cv2.resize(blurred_small, (roi.shape[1], roi.shape[0]), interpolation=cv2.INTER_LINEAR)
+    
+    # 4. Integer blending
+    glass_roi = cv2.addWeighted(blurred_roi, 1 - legend_opacity, np.full_like(roi, 255), legend_opacity, 0)
+    
+    # 5. Bitwise Masking
+    mask = np.zeros((l_h, l_w), dtype=np.uint8)
+    r = legend_corner_radius
+    cv2.rectangle(mask, (r, 0), (l_w - r, l_h), 255, -1)
+    cv2.rectangle(mask, (0, r), (l_w, l_h - r), 255, -1)
+    cv2.circle(mask, (r, r), r, 255, -1)
+    cv2.circle(mask, (l_w - r, r), r, 255, -1)
+    cv2.circle(mask, (r, l_h - r), r, 255, -1)
+    cv2.circle(mask, (l_w - r, l_h - r), r, 255, -1)
+    
+    mask_inv = cv2.bitwise_not(mask)
+    roi_bg = cv2.bitwise_and(roi, roi, mask=mask_inv)
+    roi_fg = cv2.bitwise_and(glass_roi, glass_roi, mask=mask)
+    frame[ly:ey, lx:ex] = cv2.add(roi_bg, roi_fg)
 
-        # Draw text background
-        cv2.rectangle(
-            frame,
-            (x_min, y_min - text_height - baseline),
-            (x_min + text_width, y_min),
-            color,
-            -1,
-        )
-
-        # Draw the label text
-        cv2.putText(
-            frame,
-            label,
-            (x_min, y_min - baseline),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            text_size,
-            (0, 0, 0),  # Black text
-            text_thickness,
-            cv2.LINE_AA,
-        )
-
+    cy = ly + pad + rows[0]['h'] // 2
+    for row in rows:
+        cv2.circle(frame, (lx + pad + dot_size, cy - (row['h'] // 4)), dot_size, row['color'], -1)
+        cv2.putText(frame, row['label'], (lx + pad * 2 + dot_size * 2, cy), font, text_scale, (0, 0, 0), thick, cv2.LINE_AA)
+        cy += row['h'] + space
     return frame
-
-def generate_color_palette(num_colors):
-    """
-    Generates a list of visually distinct colors.
-
-    Args:
-        num_colors: The number of colors to generate.
-
-    Returns:
-        A list of (B, G, R) tuples representing the colors.
-    """
-
-    if num_colors == 0:
-        return []  # Return an empty list if no colors are requested
-
-    # Use HSV color space for better distinct color generation
-    hsv_colors = np.array(
-        [[i / num_colors, 1, 1] for i in range(num_colors)], dtype=np.float32
-    )
-    rgb_colors = cv2.cvtColor(np.array([hsv_colors]), cv2.COLOR_HSV2BGR)[0]
-
-    # Convert to (B, G, R) tuples and scale to 0-255
-    color_palette = [(int(b * 255), int(g * 255), int(r * 255)) for b, g, r in rgb_colors]
-
-    return color_palette
