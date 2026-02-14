@@ -29,11 +29,15 @@ class VideoCaptureAsync:
         restart_delay=30.0,
         buffer_size=1,  # Minimize OpenCV internal buffer (critical for HEVC)
         opencv_backend="auto",  # 'auto', 'ffmpeg', 'gstreamer', or None
-        max_frame_age_ms=100  # Drop frames older than this (ms) (None = no limit)
+        max_frame_age_ms=100,  # Drop frames older than this (ms) (None = no limit)
+        resize_on_capture=True,  # Resize frames at capture time (saves memory/CPU downstream)
+        hw_decode=False  # Attempt hardware decode acceleration (auto-fallback to software)
     ):
         self.src = src
-        self.width = width # Currently does not resize frames, but can be used for future enhancements
-        self.height = height # Same as width, for potential future resizing
+        self.width = width
+        self.height = height
+        self.resize_on_capture = resize_on_capture
+        self.hw_decode = hw_decode
         self.driver = driver
         self._is_file_source = self._check_if_file_source(src)
         self.loop = True if self._is_file_source else False 
@@ -62,6 +66,7 @@ class VideoCaptureAsync:
         self._heartbeat_config = heartbeat_config or {}
         self._data_uploader = None
         self._last_heartbeat_time = 0
+        self._debug_frame_count = 0  # Initialize to avoid dynamic attribute lookup on every frame
         
         self.logger = get_logger(self)
 
@@ -146,6 +151,14 @@ class VideoCaptureAsync:
             if self.buffer_size is not None:
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, self.buffer_size)
                 self.logger.debug(f"[{self.src}] Set buffer size to {self.buffer_size}")
+            
+            # Enable hardware decode if requested (auto-fallback to software)
+            if self.hw_decode:
+                try:
+                    self.cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
+                    self.logger.info(f"[{self.src}] Hardware decode enabled")
+                except:
+                    self.logger.debug(f"[{self.src}] Hardware decode not available, using software")
 
             fps = self.cap.get(cv2.CAP_PROP_FPS)
             if fps is not None and fps > 0:
@@ -314,6 +327,13 @@ class VideoCaptureAsync:
                     attempted_read_this_cycle = True
                     grabbed, frame = self.cap.read()
 
+                # --- Phase 2.5: Resize frame if requested (saves memory downstream) ---
+                if grabbed and frame is not None and self.resize_on_capture:
+                    if self.width and self.height:
+                        current_h, current_w = frame.shape[:2]
+                        if current_w != self.width or current_h != self.height:
+                            frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
+
                 # --- Phase 3: Handle read outcome ---
                 if attempted_read_this_cycle:
                     if not grabbed: # Read failure (stream, or file after loop attempt)
@@ -360,30 +380,42 @@ class VideoCaptureAsync:
              self._send_heartbeat(f"Video capture {self.src} thread stopped normally.")
 
 
-    def read(self, wait_for_frame=False, timeout=1.0):
-        if wait_for_frame and not self._grabbed and self.started: # Check self.started
+    def read(self, wait_for_frame=False, timeout=1.0, copy=True):
+        """
+        Read the latest captured frame.
+        
+        Args:
+            wait_for_frame (bool): If True, wait for first frame with timeout. Default: False.
+            timeout (float): Timeout in seconds when waiting for first frame. Default: 1.0.
+            copy (bool): If True, return a copy of the frame. If False, return reference directly
+                        (faster but caller must not modify). Default: True for backward compatibility.
+        
+        Returns:
+            tuple: (grabbed, frame) where grabbed is bool and frame is np.ndarray or None.
+        """
+        if wait_for_frame and not self._grabbed and self.started:
             start_time = time.monotonic()
-            while not self._grabbed and self.started: # Check self.started in loop
+            while not self._grabbed and self.started:
                 if time.monotonic() - start_time > timeout:
                     error_msg = f"Timeout waiting for first frame from {self.src}"
                     self.logger.warning(f"[{self.src}] {error_msg}")
                     return False, None
-                if self._stop_event.is_set(): # If thread stopped while waiting
+                if self._stop_event.is_set():
                     return False, None
                 time.sleep(0.005)
 
         with self._read_lock:
-            frame = self._frame.copy() if self._grabbed and self._frame is not None else None
+            # Optimized: avoid copy if caller specifies copy=False (saves ~6MB for 1080p)
+            frame = self._frame.copy() if (self._grabbed and self._frame is not None and copy) else self._frame
             grabbed = self._grabbed
         
-        # Debug log frame info periodically
-        if grabbed and frame is not None and hasattr(self, '_debug_frame_count'):
-            self._debug_frame_count = getattr(self, '_debug_frame_count', 0) + 1
+        # Debug log frame info periodically (now using pre-initialized counter)
+        if grabbed and frame is not None:
+            self._debug_frame_count += 1
             if self._debug_frame_count % 1000 == 0:  # Every 1000 frames
-                self.logger.debug(f"[{self.src}] Frame info: shape={frame.shape}, dtype={frame.dtype}")
-        elif grabbed and frame is not None:
-            self._debug_frame_count = 1
-            self.logger.debug(f"[{self.src}] First frame info: shape={frame.shape}, dtype={frame.dtype}")
+                self.logger.debug(f"[{self.src}] Frame {self._debug_frame_count}: shape={frame.shape}, dtype={frame.dtype}")
+            elif self._debug_frame_count == 1:
+                self.logger.debug(f"[{self.src}] First frame: shape={frame.shape}, dtype={frame.dtype}")
         
         return grabbed, frame
 

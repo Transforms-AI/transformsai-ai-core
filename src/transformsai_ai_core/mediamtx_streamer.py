@@ -25,7 +25,7 @@ class MediaMTXStreamer:
     def __init__(self, mediamtx_ip, rtsp_port, camera_sn_id, fps=30, 
                  frame_width=1920, frame_height=1080, bitrate="1500k",
                  debug_log_interval=60.0, encoder_preset="ultrafast",
-                 encoder_codec="copy", stream_queue_size=2):
+                 encoder_codec="copy", stream_queue_size=2, hw_encode=False):
         self.mediamtx_ip = mediamtx_ip
         self.rtsp_port = rtsp_port
         self.camera_sn_id = camera_sn_id
@@ -38,6 +38,7 @@ class MediaMTXStreamer:
         # Encoder settings for resource optimization
         self.encoder_preset = encoder_preset  # ultrafast, fast, medium, etc.
         self.encoder_codec = encoder_codec  # 'copy' to avoid re-encoding, or 'libx264'
+        self.hw_encode = hw_encode  # Auto-detect hardware encoder if True
         self.stream_queue_size = stream_queue_size  # Async queue depth
         
         # Setup logging using central logger
@@ -48,6 +49,7 @@ class MediaMTXStreamer:
         
         # Process management
         self.ffmpeg_process = None
+        self.ffmpeg_log_file = None  # Track log file for cleanup
         self.is_streaming = False
         self.frame_lock = Lock()
         self.restart_count = 0
@@ -72,7 +74,7 @@ class MediaMTXStreamer:
         self.dropped_frames = 0
         self.buffer_full_count = 0
         self.last_network_check = 0
-        self.network_check_interval = 10.0  # Check network every 10 seconds
+        self.network_check_interval = 30.0  # Optimized: check network every 30s (was 10s)
         self.frame_queue_size = 0
         self.max_frame_queue_size = 0
         
@@ -80,7 +82,15 @@ class MediaMTXStreamer:
         self.processing_bottleneck_threshold = 0.020  # 20ms threshold
         self.network_bottleneck_threshold = 0.100  # 100ms threshold
         
+        # Create logs directory once at init (not per start_streaming call)
+        self.logs_dir = os.path.join(os.getcwd(), 'logs')
+        os.makedirs(self.logs_dir, exist_ok=True)
+        
+        # Detect best encoder (hardware if available, software fallback)
+        self.detected_encoder = self._detect_best_encoder() if hw_encode else 'libx264'
+        
         self.logger.info(f"[Stream] Initialized streamer for camera {self.camera_sn_id}: {self.rtsp_url}")
+        self.logger.info(f"[Stream] Using encoder: {self.detected_encoder}")
     
     def _is_ip_address(self, host):
         """Check if host is an IP address (IPv4 or IPv6)."""
@@ -103,6 +113,34 @@ class MediaMTXStreamer:
         else:
             return f"https://{self.mediamtx_ip}/live/cam_sn_{self.camera_sn_id}/"
     
+    def _detect_best_encoder(self):
+        """Detect best available hardware encoder, fallback to software.
+        Priority: NVIDIA > Intel QSV > AMD VAAPI > ARM V4L2M2M > Software
+        """
+        hw_encoders = ['h264_nvenc', 'h264_qsv', 'h264_vaapi', 'h264_v4l2m2m']
+        
+        for encoder in hw_encoders:
+            if self._test_encoder(encoder):
+                self.logger.info(f"[Stream] Hardware encoder detected: {encoder}")
+                return encoder
+        
+        self.logger.info(f"[Stream] No hardware encoder detected, using software: libx264")
+        return 'libx264'
+    
+    def _test_encoder(self, encoder):
+        """Quick test if FFmpeg encoder is available."""
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-encoders'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=2,
+                text=True
+            )
+            return encoder in result.stdout
+        except:
+            return False
+    
     def start_streaming(self):
         """Start FFmpeg streaming process with diagnostics."""
         if self.is_streaming:
@@ -116,7 +154,10 @@ class MediaMTXStreamer:
             return False
         
         try:
-            # Build FFmpeg command with configurable codec/preset
+            # Build FFmpeg command with auto-detected encoder
+            codec = self.detected_encoder
+            
+            # Base command
             ffmpeg_cmd = [
                 'ffmpeg', '-y',
                 '-f', 'rawvideo',
@@ -125,9 +166,22 @@ class MediaMTXStreamer:
                 '-s', f'{self.frame_width}x{self.frame_height}',
                 '-r', str(self.fps),
                 '-i', '-',
-                '-c:v', 'libx264',  # TODO: Make codec configurable, copy isn't tested
-                '-preset', self.encoder_preset,
-                '-tune', 'zerolatency',
+                '-c:v', codec,
+            ]
+            
+            # Hardware-specific settings
+            if 'nvenc' in codec:
+                # NVIDIA: Use preset, tune for low latency
+                ffmpeg_cmd.extend(['-preset', self.encoder_preset, '-tune', 'zerolatency'])
+            elif 'qsv' in codec or 'vaapi' in codec:
+                # Intel/AMD: Use preset if supported
+                ffmpeg_cmd.extend(['-preset', self.encoder_preset])
+            elif codec == 'libx264':
+                # Software: Full control
+                ffmpeg_cmd.extend(['-preset', self.encoder_preset, '-tune', 'zerolatency'])
+            
+            # Common settings
+            ffmpeg_cmd.extend([
                 '-profile:v', 'main',
                 '-pix_fmt', 'yuv420p',
                 '-b:v', self.bitrate,
@@ -136,20 +190,16 @@ class MediaMTXStreamer:
                 '-rtsp_transport', 'tcp',
                 '-loglevel', 'warning',
                 self.rtsp_url
-            ]
-            
-            # Create logs directory if it doesn't exist and set log file path
-            logs_dir = os.path.join(os.getcwd(), 'logs')
-            os.makedirs(logs_dir, exist_ok=True)
-            log_file_path = os.path.join(logs_dir, f'ffmpeg_cam_{self.camera_sn_id}.log')
+            ])
             
             # Create log file for FFmpeg output
-            log_file = open(log_file_path, 'w')
+            log_file_path = os.path.join(self.logs_dir, f'ffmpeg_cam_{self.camera_sn_id}.log')
+            self.ffmpeg_log_file = open(log_file_path, 'w')
             
             self.ffmpeg_process = subprocess.Popen(
                 ffmpeg_cmd,
                 stdin=subprocess.PIPE,
-                stdout=log_file,
+                stdout=self.ffmpeg_log_file,
                 stderr=subprocess.STDOUT,  # Redirect stderr to log file
                 bufsize=0,
                 preexec_fn=os.setsid if os.name != 'nt' else None
@@ -182,7 +232,9 @@ class MediaMTXStreamer:
                 return True
             else:
                 # Process died immediately - check log
-                log_file.close()
+                if self.ffmpeg_log_file:
+                    self.ffmpeg_log_file.close()
+                    self.ffmpeg_log_file = None
                 with open(log_file_path, 'r') as f:
                     error_log = f.read()
                 self.logger.error(f"[FFmpeg] Failed to start. Log file: {log_file_path}")
@@ -239,6 +291,14 @@ class MediaMTXStreamer:
             
             self.ffmpeg_process = None
         
+        # Close log file handle
+        if self.ffmpeg_log_file:
+            try:
+                self.ffmpeg_log_file.close()
+                self.ffmpeg_log_file = None
+            except Exception as e:
+                self.logger.warning(f"[Stream] Error closing log file: {e}")
+        
         self.logger.info("[Stream] Streaming stopped")
     
     def update_frame(self, frame):
@@ -249,6 +309,7 @@ class MediaMTXStreamer:
         if not self.is_streaming or not self.ffmpeg_process:
             return False
         
+        # Optimize: call time.time() once and reuse
         frame_start_time = time.time()
         
         # Process health check with less frequent restarts
@@ -288,7 +349,9 @@ class MediaMTXStreamer:
                 # Synchronous write (fallback)
                 with self.frame_lock:
                     write_start_time = time.time()
-                    self.ffmpeg_process.stdin.write(frame.tobytes())
+                    # Optimized: use memoryview to avoid copy for large frames
+                    frame_data = memoryview(frame)
+                    self.ffmpeg_process.stdin.write(frame_data)
                     self.ffmpeg_process.stdin.flush()
                     write_time = time.time() - write_start_time
                     self.frame_write_times.append(write_time)
@@ -299,15 +362,14 @@ class MediaMTXStreamer:
                     self.frame_count += 1
                     self.frames_since_last_log += 1
             
-            self.last_frame_time = time.time()
+            self.last_frame_time = frame_start_time
             
             # Periodic debug logging
-            current_time = time.time()
-            if current_time - self.last_debug_log_time >= self.debug_log_interval:
+            if frame_start_time - self.last_debug_log_time >= self.debug_log_interval:
                 self._log_performance_debug()
             
             # Periodic network check
-            if current_time - self.last_network_check >= self.network_check_interval:
+            if frame_start_time - self.last_network_check >= self.network_check_interval:
                 self._check_network_health()
             
             return True
@@ -347,8 +409,8 @@ class MediaMTXStreamer:
     def _get_system_metrics(self):
         """Get current system resource usage."""
         try:
-            # CPU usage
-            cpu_percent = psutil.cpu_percent(interval=0.1)
+            # Optimized: non-blocking CPU measurement (interval=None uses cached value)
+            cpu_percent = psutil.cpu_percent(interval=None)
             
             # Memory usage
             memory = psutil.virtual_memory()
@@ -439,7 +501,9 @@ class MediaMTXStreamer:
                 # Write to FFmpeg stdin
                 with self.frame_lock:
                     write_start_time = time.time()
-                    self.ffmpeg_process.stdin.write(frame.tobytes())
+                    # Optimized: use memoryview to avoid copy
+                    frame_data = memoryview(frame)
+                    self.ffmpeg_process.stdin.write(frame_data)
                     self.ffmpeg_process.stdin.flush()
                     write_time = time.time() - write_start_time
                     

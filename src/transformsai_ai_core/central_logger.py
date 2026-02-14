@@ -89,6 +89,9 @@ logging.getLogger("watchdog").setLevel(logging.WARNING)
 
 # --- 3. The Public API Function ---
 
+# Cache for logger wrappers to avoid creating new instances for same name
+_LOGGER_CACHE = {}
+
 def get_logger(name: Union[str, object] = None, module_name: str = None):
     """
     Get the pre-configured Loguru logger instance.
@@ -105,10 +108,19 @@ def get_logger(name: Union[str, object] = None, module_name: str = None):
     if logger_name and not isinstance(logger_name, str):
         if hasattr(logger_name, '__class__'):
             logger_name = logger_name.__class__.__name__
+    
+    # Use cache key to avoid creating duplicate wrappers
+    cache_key = logger_name if isinstance(logger_name, str) else None
+    
+    if cache_key and cache_key in _LOGGER_CACHE:
+        return _LOGGER_CACHE[cache_key]
 
     base_logger = logger.bind(name=logger_name) if isinstance(logger_name, str) else logger
     
     class LoggerWrapper:
+        """Lightweight wrapper with __slots__ for memory efficiency."""
+        __slots__ = ('_logger',)
+        
         def __init__(self, base):
             self._logger = base
         
@@ -138,4 +150,10 @@ def get_logger(name: Union[str, object] = None, module_name: str = None):
         def __getattr__(self, name):
             return getattr(self._logger, name)
     
-    return LoggerWrapper(base_logger)
+    wrapper = LoggerWrapper(base_logger)
+    
+    # Cache the wrapper for future use
+    if cache_key:
+        _LOGGER_CACHE[cache_key] = wrapper
+    
+    return wrapper
