@@ -23,10 +23,7 @@ __author__ = "TransformsAI"
 
 @dataclass
 class CacheItem:
-    """Represents a cached upload item. Uses __slots__ for memory efficiency."""
-    __slots__ = ('uuid', 'timestamp', 'url', 'method', 'data_payload', 'headers', 
-                 'cached_files', 'retry_count', 'is_heartbeat')
-    
+    """Represents a cached upload item."""
     uuid: str
     timestamp: float
     url: str
