@@ -160,13 +160,13 @@ class _YOLOExportMixin:
         
         # If batch_size is 1 or sources fit in one batch, process directly
         if self.batch_size >= len(sources):
-            return base_predict(sources, **kwargs)
+            return base_predict(self, sources, **kwargs)
         
         # Sequential batching: chunk inputs and aggregate results
         all_results = []
         for i in range(0, len(sources), self.batch_size):
             batch = sources[i:i + self.batch_size]
-            batch_results = base_predict(batch, **kwargs)
+            batch_results = base_predict(self, batch, **kwargs)
             
             # Aggregate results (handle both list and generator)
             if hasattr(batch_results, '__iter__'):
