@@ -30,13 +30,13 @@ class VideoCaptureAsync:
         buffer_size=1,  # Minimize OpenCV internal buffer (critical for HEVC)
         opencv_backend="auto",  # 'auto', 'ffmpeg', 'gstreamer', or None
         max_frame_age_ms=100,  # Drop frames older than this (ms) (None = no limit)
-        resize_on_capture=True,  # Resize frames at capture time (saves memory/CPU downstream)
+        auto_resize=True,  # Resize frames in read() if dimensions don't match width/height
         hw_decode=False  # Attempt hardware decode acceleration (auto-fallback to software)
     ):
         self.src = src
         self.width = width
         self.height = height
-        self.resize_on_capture = resize_on_capture
+        self.auto_resize = auto_resize
         self.hw_decode = hw_decode
         self.driver = driver
         self._is_file_source = self._check_if_file_source(src)
@@ -152,13 +152,13 @@ class VideoCaptureAsync:
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, self.buffer_size)
                 self.logger.debug(f"[{self.src}] Set buffer size to {self.buffer_size}")
             
-            # Enable hardware decode if requested (auto-fallback to software)
+            # Enable hardware decode if requested
             if self.hw_decode:
                 try:
                     self.cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
-                    self.logger.info(f"[{self.src}] Hardware decode enabled")
-                except:
-                    self.logger.debug(f"[{self.src}] Hardware decode not available, using software")
+                    self.logger.debug(f"[{self.src}] Hardware decode requested")
+                except Exception as e:
+                    self.logger.warning(f"[{self.src}] Failed to enable hardware decode: {e}")
 
             fps = self.cap.get(cv2.CAP_PROP_FPS)
             if fps is not None and fps > 0:
@@ -176,6 +176,10 @@ class VideoCaptureAsync:
                              f"(FPS: {self._fps:.2f}, Frames: {self._frame_count})")
             else:
                 self.logger.info(f"[{self.src}] Initialized stream/camera source (FPS: {self._fps:.2f})")
+            
+            # Verify and log hardware decode status
+            if self.hw_decode:
+                self._verify_hw_decode()
 
         except Exception as e:
             # Ensure cap is None if initialization failed partway
@@ -184,6 +188,53 @@ class VideoCaptureAsync:
                 self.cap = None
             raise RuntimeError(f"Capture initialization failed for {self.src}: {e}") from e
     
+    def _verify_hw_decode(self):
+        """Query and log actual hardware decode configuration."""
+        if not self.cap or not self.cap.isOpened():
+            return
+        
+        try:
+            # Query actual backend
+            backend_id = int(self.cap.get(cv2.CAP_PROP_BACKEND))
+            backend_map = {
+                cv2.CAP_FFMPEG: "FFmpeg",
+                cv2.CAP_GSTREAMER: "GStreamer",
+                cv2.CAP_ANY: "Auto"
+            }
+            backend_name = backend_map.get(backend_id, f"Unknown({backend_id})")
+            
+            # Query HW acceleration status
+            hw_accel = self.cap.get(cv2.CAP_PROP_HW_ACCELERATION)
+            hw_status = "ENABLED" if hw_accel and hw_accel > 0 else "DISABLED"
+            
+            # Query codec
+            fourcc = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+            codec = "".join([chr((fourcc >> 8 * i) & 0xFF) for i in range(4)]) if fourcc else "unknown"
+            
+            # Get resolution
+            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            
+            self.logger.info(
+                f"[{self.src}] Decode config: backend={backend_name}, "
+                f"hw_accel={hw_status}, codec={codec}, resolution={width}x{height}"
+            )
+            
+            # Log OpenCV build info once per class (check for HW support)
+            if not hasattr(self.__class__, '_build_info_logged'):
+                build_info = cv2.getBuildInformation()
+                hw_features = []
+                for line in build_info.split('\n'):
+                    line = line.strip()
+                    if any(keyword in line for keyword in ['CUDA', 'VA-API', 'Video', 'FFmpeg', 'GStreamer']):
+                        hw_features.append(line)
+                if hw_features:
+                    self.logger.debug(f"OpenCV HW capabilities: {'; '.join(hw_features[:5])}")  # Limit to 5 lines
+                self.__class__._build_info_logged = True
+                
+        except Exception as e:
+            self.logger.warning(f"[{self.src}] Failed to query decode properties: {e}")
+
     def get_height_width(self):
         """
         Returns the height and width of the video capture source.
@@ -327,13 +378,6 @@ class VideoCaptureAsync:
                     attempted_read_this_cycle = True
                     grabbed, frame = self.cap.read()
 
-                # --- Phase 2.5: Resize frame if requested (saves memory downstream) ---
-                if grabbed and frame is not None and self.resize_on_capture:
-                    if self.width and self.height:
-                        current_h, current_w = frame.shape[:2]
-                        if current_w != self.width or current_h != self.height:
-                            frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
-
                 # --- Phase 3: Handle read outcome ---
                 if attempted_read_this_cycle:
                     if not grabbed: # Read failure (stream, or file after loop attempt)
@@ -408,6 +452,14 @@ class VideoCaptureAsync:
             # Optimized: avoid copy if caller specifies copy=False (saves ~6MB for 1080p)
             frame = self._frame.copy() if (self._grabbed and self._frame is not None and copy) else self._frame
             grabbed = self._grabbed
+        
+        # Auto-resize if enabled and dimensions don't match target
+        if grabbed and frame is not None and self.auto_resize and self.width and self.height:
+            current_h, current_w = frame.shape[:2]
+            if current_w != self.width or current_h != self.height:
+                # Use INTER_AREA for files (better quality), INTER_LINEAR for streams (more robust)
+                interp = cv2.INTER_AREA if self._is_file_source else cv2.INTER_LINEAR
+                frame = cv2.resize(frame, (self.width, self.height), interpolation=interp)
         
         # Debug log frame info periodically (now using pre-initialized counter)
         if grabbed and frame is not None:
