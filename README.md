@@ -218,7 +218,6 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
-```
     
     # Process the frame
     cv2.imshow("Frame", frame)
