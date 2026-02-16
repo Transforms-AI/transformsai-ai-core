@@ -189,7 +189,6 @@ cap = VideoCaptureAsync(
     RTSP_URL,
     width=1280,              # Target resolution
     height=720,
-    resize_on_capture=True,  # Resize immediately (saves ~13MB/frame for 3000×1800→720p)
     hw_decode=True,          # Hardware decode if available (auto-fallback)
     auto_restart_on_fail=True,
     buffer_size=1            # Minimize lag for HEVC streams
