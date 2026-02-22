@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transformsai-ai-core"
-version = "3.1.0"
+version = "3.0.3"
 description = "TransformsAI Core Library - Utilities for AI vision applications"
 readme = "README.md"
 authors = [
@@ -48,7 +48,7 @@ trt = [
     "onnx",
     "onnxruntime-gpu",
     "onnxslim",
-    "tensorrt-cu12==10.15.1.29; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "tensorrt-cu12>=10.13.3.9",
     "torch", 
     "torchvision", 
     "ultralytics",
@@ -77,6 +77,19 @@ onnx = [
     "clip",
 ]
 
+# All option - includes everything
+all = [
+    "onnx",
+    "onnxruntime-gpu",
+    "onnxslim",
+    "tensorrt-cu12>=10.13.3.9",
+    # "rknn-toolkit-lite2>=2.3.2; sys_platform == 'aarch64'",
+    "ultralytics",
+    "torch", 
+    "torchvision",
+    "clip",
+]
+
 # --- Setuptools Configuration (Replaces setup.cfg and MANIFEST.in) ---
 [tool.setuptools.packages.find]
 # This tells setuptools to look for packages inside the 'src' directory
@@ -89,6 +102,7 @@ include-package-data = true
 [tool.uv]
 conflicts = [
     [
+        { extra = "all" },
         { extra = "rknn" },
         { extra = "trt" },
         { extra = "onnx" },
@@ -97,5 +111,6 @@ conflicts = [
 
 [tool.uv.sources]
 clip = { git = "https://github.com/ultralytics/CLIP.git", rev = "643beff3883b5720d94b6b9c9eca12fa9fb72fb1" }
+
 [project.scripts]
 transformsaicore = "transformsai_ai_core.main:main"

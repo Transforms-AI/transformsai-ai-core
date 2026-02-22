@@ -21,10 +21,6 @@ __all__ = [
     'VideoCaptureAsync',
     'time_to_string',
     'mat_to_response',
-    # CPU affinity utilities
-    'set_thread_affinity',
-    'set_process_affinity',
-    'get_current_affinity',
     # Config schema
     'AppConfig',
     'MetaConfig',
@@ -34,7 +30,6 @@ __all__ = [
     'DatasendConfig',
     'LivestreamConfig',
     'AdvancedConfig',
-    'CpuAffinityConfig',
     # Config loader
     'load_config',
     'save_config',
@@ -60,10 +55,6 @@ _LAZY_IMPORTS = {
     'VideoCaptureAsync': ('video_capture', 'VideoCaptureAsync'),
     'time_to_string': ('utils', 'time_to_string'),
     'mat_to_response': ('utils', 'mat_to_response'),
-    # CPU affinity utilities
-    'set_thread_affinity': ('cpu_affinity', 'set_thread_affinity'),
-    'set_process_affinity': ('cpu_affinity', 'set_process_affinity'),
-    'get_current_affinity': ('cpu_affinity', 'get_current_affinity'),
     # Config schema
     'AppConfig': ('config_schema', 'AppConfig'),
     'MetaConfig': ('config_schema', 'MetaConfig'),
@@ -73,7 +64,6 @@ _LAZY_IMPORTS = {
     'DatasendConfig': ('config_schema', 'DatasendConfig'),
     'LivestreamConfig': ('config_schema', 'LivestreamConfig'),
     'AdvancedConfig': ('config_schema', 'AdvancedConfig'),
-    'CpuAffinityConfig': ('config_schema', 'CpuAffinityConfig'),
     # Config loader
     'load_config': ('config_loader', 'load_config'),
     'save_config': ('config_loader', 'save_config'),
