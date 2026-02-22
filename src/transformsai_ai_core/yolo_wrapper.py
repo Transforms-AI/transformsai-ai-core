@@ -10,8 +10,9 @@ Provides wrapper classes that extend ultralytics YOLO and YOLOE with:
 
 import gc
 from pathlib import Path
-from typing import Any, Union, List
+from typing import Any, Union, List, Optional
 from .central_logger import get_logger
+from .cpu_affinity import set_thread_affinity
 
 try:
     from ultralytics import YOLO, YOLOE
@@ -152,6 +153,11 @@ class _YOLOExportMixin:
         Returns:
             List of Results objects (same as ultralytics)
         """
+        # Set-once: pin the calling (inference) thread on the very first predict call
+        if getattr(self, 'cpu_affinity', None) and not getattr(self, '_affinity_applied', True):
+            set_thread_affinity(self.cpu_affinity, "YOLOWrapper_inference")
+            self._affinity_applied = True
+
         # Normalize input to list
         if not isinstance(source, list):
             sources = [source]
@@ -210,6 +216,9 @@ class YOLOWrapper(_YOLOExportMixin, YOLO):
         self.export_options = model_dict.get("export_options", {})
         self.batch_size = model_dict.get("batch", 1)
         self.exported_model_path = None
+        # Pop before forwarding kwargs to YOLO.__init__ (runtime concern, not a model param)
+        self.cpu_affinity: Optional[List[int]] = kwargs.pop("cpu_affinity", None)
+        self._affinity_applied = False
         
         # Determine model path to load (exported or original)
         model_to_load = self._prepare_model(YOLO)
@@ -271,6 +280,9 @@ class YOLOEWrapper(_YOLOExportMixin, YOLOE):
         self.task = model_dict.get("load_options", {}).get("task", "detect")
         self.set_classes = model_dict.get("set_classes", None)
         self.exported_model_path = None
+        # Pop before forwarding kwargs to YOLOE.__init__ (runtime concern, not a model param)
+        self.cpu_affinity: Optional[List[int]] = kwargs.pop("cpu_affinity", None)
+        self._affinity_applied = False
         
         # Determine model path to load (exported or original)
         model_to_load = self._prepare_model(YOLOE)

@@ -2,9 +2,11 @@ import threading
 import cv2
 import time
 import os
+from typing import List, Optional
 from .datasend import DataUploader 
 from .utils import time_to_string 
 from .central_logger import get_logger
+from .cpu_affinity import set_thread_affinity
 
 # --- Information About Script ---
 __name__ = "VideoCaptureAsync with Heartbeat"
@@ -31,7 +33,8 @@ class VideoCaptureAsync:
         opencv_backend="auto",  # 'auto', 'ffmpeg', 'gstreamer', or None
         max_frame_age_ms=100,  # Drop frames older than this (ms) (None = no limit)
         auto_resize=True,  # Resize frames in read() if dimensions don't match width/height
-        hw_decode=False  # Attempt hardware decode acceleration (auto-fallback to software)
+        hw_decode=False,  # Attempt hardware decode acceleration (auto-fallback to software)
+        cpu_affinity: Optional[List[int]] = None  # Pin capture thread to these cores (Linux only)
     ):
         self.src = src
         self.width = width
@@ -42,6 +45,7 @@ class VideoCaptureAsync:
         self._is_file_source = self._check_if_file_source(src)
         self.loop = True if self._is_file_source else False 
 
+        self.cpu_affinity = cpu_affinity
         self.auto_restart_on_fail = auto_restart_on_fail
         self.restart_delay = restart_delay
         
@@ -314,6 +318,10 @@ class VideoCaptureAsync:
         return self
 
     def _update(self):
+        # Pin this thread to the requested cores on first entry (set once, stays for restarts)
+        if self.cpu_affinity:
+            set_thread_affinity(self.cpu_affinity, f"VideoCaptureAsync_{self.src}")
+
         is_file = self._is_file_source
         target_frame_duration = 1.0 / self._fps if self._fps > 0 else 0
 

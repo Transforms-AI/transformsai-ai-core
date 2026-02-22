@@ -10,7 +10,9 @@ import re
 import queue
 from threading import Lock
 from collections import deque
+from typing import List, Optional
 from .central_logger import get_logger
+from .cpu_affinity import set_thread_affinity, set_process_affinity
 
 # --- Information About Script ---
 __name__ = "Streamer for MediaMTX Server"
@@ -25,7 +27,8 @@ class MediaMTXStreamer:
     def __init__(self, mediamtx_ip, rtsp_port, camera_sn_id, fps=30, 
                  frame_width=1920, frame_height=1080, bitrate="1500k",
                  debug_log_interval=60.0, encoder_preset="ultrafast",
-                 encoder_codec="copy", stream_queue_size=2, hw_encode=False):
+                 encoder_codec="copy", stream_queue_size=2, hw_encode=False,
+                 cpu_affinity: Optional[List[int]] = None):
         self.mediamtx_ip = mediamtx_ip
         self.rtsp_port = rtsp_port
         self.camera_sn_id = camera_sn_id
@@ -40,6 +43,7 @@ class MediaMTXStreamer:
         self.encoder_codec = encoder_codec  # 'copy' to avoid re-encoding, or 'libx264'
         self.hw_encode = hw_encode  # Auto-detect hardware encoder if True
         self.stream_queue_size = stream_queue_size  # Async queue depth
+        self.cpu_affinity = cpu_affinity  # Pin writer thread and FFmpeg to these cores (Linux only)
         
         # Setup logging using central logger
         self.logger = get_logger(self)
@@ -264,7 +268,12 @@ class MediaMTXStreamer:
                 self.is_streaming = True
                 self.restart_count += 1
                 self.last_restart_time = current_time
-                
+
+                # Pin FFmpeg process to requested cores (from parent, avoids preexec_fn conflict)
+                if self.cpu_affinity:
+                    set_process_affinity(self.ffmpeg_process.pid, self.cpu_affinity,
+                                         f"FFmpeg_{self.camera_sn_id}")
+
                 # Start async frame writer thread
                 if self.stream_queue_size > 0:
                     self._frame_queue = queue.Queue(maxsize=self.stream_queue_size)
@@ -543,6 +552,10 @@ class MediaMTXStreamer:
 
     def _frame_writer_loop(self):
         """Async frame writer thread - decouples encoding from main processing."""
+        # Pin this thread to the requested cores on first entry
+        if self.cpu_affinity:
+            set_thread_affinity(self.cpu_affinity, f"MediaMTX_Writer_{self.camera_sn_id}")
+
         self.logger.info("[Stream] Frame writer thread started")
         
         while not self._writer_stop_event.is_set():

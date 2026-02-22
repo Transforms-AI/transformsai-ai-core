@@ -107,6 +107,32 @@ class LivestreamConfig(BaseModel):
 
 
 # ==============================================================================
+# CPU Affinity Configuration
+# ==============================================================================
+class CpuAffinityConfig(BaseModel):
+    """Optional CPU core pinning for edge/big.LITTLE deployments.
+
+    Assign streaming I/O threads (capture, FFmpeg, writer) to efficiency cores
+    and inference threads (YOLO) to performance cores to reduce contention.
+
+    Example (RK3576 / RK3588 big.LITTLE):
+        enabled: true
+        streaming_cores: [0, 1]   # A55 efficiency cores
+        inference_cores: [2, 3, 4, 5, 6, 7]  # A76 performance cores
+    """
+
+    enabled: bool = Field(default=False, description="Enable CPU core pinning (Linux only)")
+    streaming_cores: list[int] = Field(
+        default_factory=list,
+        description="Cores for capture thread, FFmpeg process, and frame writer thread, datasend worker threads"
+    )
+    inference_cores: list[int] = Field(
+        default_factory=list,
+        description="Cores for YOLO inference thread and DataUploader worker threads"
+    )
+
+
+# ==============================================================================
 # Advanced Configuration
 # ==============================================================================
 class AdvancedConfig(BaseModel):
@@ -116,6 +142,7 @@ class AdvancedConfig(BaseModel):
     timings: dict[str, Any] = Field(default_factory=dict, description="Freeform timing values")
     datasend: DatasendConfig = Field(default_factory=DatasendConfig, description="API settings")
     livestream: LivestreamConfig = Field(default_factory=LivestreamConfig, description="Streaming settings")
+    cpu_affinity: CpuAffinityConfig = Field(default_factory=CpuAffinityConfig, description="CPU core pinning settings")
     pipeline: dict[str, Any] = Field(default_factory=dict, description="Freeform project-specific settings")
 
 

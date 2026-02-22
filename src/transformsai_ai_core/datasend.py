@@ -15,6 +15,7 @@ from functools import wraps
 from typing import Dict, List, Optional, Tuple, Callable, Union
 from dataclasses import dataclass, field
 from .central_logger import get_logger
+from .cpu_affinity import set_thread_affinity
 
 # --- Information About Script ---
 __name__ = "DataUploader with Caching"
@@ -353,7 +354,8 @@ class DataUploader:
                  max_cache_items: int = 300,
                  max_cache_age_seconds: int = 24*60*60,
                  source: str = "Frame Processor",
-                 project_version: Optional[str] = None):
+                 project_version: Optional[str] = None,
+                 cpu_affinity: Optional[List[int]] = None):
         
         self.logger = get_logger(self)
         
@@ -394,7 +396,14 @@ class DataUploader:
         self.logger.info(f"DataUploader initialized - MAC: {self.mac_address}, IP: {self.ip_address}, Workers: {max_workers}")
         
         # Threading
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        # Each worker is pinned to cpu_affinity cores (if provided) via the initializer.
+        _initializer, _initargs = (None, ())
+        if cpu_affinity:
+            _initializer = set_thread_affinity
+            _initargs = (cpu_affinity, "DataUploader")
+        self.executor = ThreadPoolExecutor(max_workers=max_workers,
+                                           initializer=_initializer,
+                                           initargs=_initargs)
         self.shutting_down_event = threading.Event()
         
         # Cache management
