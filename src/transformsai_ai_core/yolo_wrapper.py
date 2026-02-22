@@ -278,7 +278,7 @@ class YOLOEWrapper(_YOLOExportMixin, YOLOE):
         self.export_options = model_dict.get("export_options", {})
         self.batch_size = model_dict.get("batch", 1)
         self.task = model_dict.get("load_options", {}).get("task", "detect")
-        self.set_classes = model_dict.get("set_classes", None)
+        self.set_classes = None # TODO: Currently set classes doesn't work, FIX LATER
         self.exported_model_path = None
         # Pop before forwarding kwargs to YOLOE.__init__ (runtime concern, not a model param)
         self.cpu_affinity: Optional[List[int]] = kwargs.pop("cpu_affinity", None)
