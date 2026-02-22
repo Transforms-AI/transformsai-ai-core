@@ -145,6 +145,56 @@ class MediaMTXStreamer:
         except:
             return False
     
+    def _map_preset_to_encoder(self, preset, encoder):
+        """Map libx264-style presets to hardware encoder equivalents.
+        
+        Args:
+            preset: libx264-style preset (ultrafast, fast, medium, slow, etc.)
+            encoder: target encoder (h264_nvenc, h264_qsv, h264_vaapi, libx264, etc.)
+        
+        Returns:
+            str: preset compatible with the target encoder
+        """
+        # NVIDIA h264_nvenc: supports 'default', 'fast', 'medium', 'slow'
+        if 'nvenc' in encoder:
+            preset_map = {
+                'ultrafast': 'fast',
+                'fast': 'fast',
+                'medium': 'medium',
+                'slow': 'slow',
+                'slower': 'slow',
+                'veryslow': 'slow',
+            }
+            return preset_map.get(preset, 'fast')
+        
+        # Intel QSV: supports 'veryfast', 'fast', 'balanced', 'slow', 'veryslow'
+        elif 'qsv' in encoder:
+            preset_map = {
+                'ultrafast': 'veryfast',
+                'fast': 'fast',
+                'medium': 'balanced',
+                'slow': 'slow',
+                'slower': 'veryslow',
+                'veryslow': 'veryslow',
+            }
+            return preset_map.get(preset, 'fast')
+        
+        # AMD VAAPI: supports 'default', 'fast', 'medium', 'slow' (driver dependent)
+        elif 'vaapi' in encoder:
+            preset_map = {
+                'ultrafast': 'fast',
+                'fast': 'fast',
+                'medium': 'medium',
+                'slow': 'slow',
+                'slower': 'slow',
+                'veryslow': 'slow',
+            }
+            return preset_map.get(preset, 'fast')
+        
+        # libx264/libx265 software encoders: native support for all presets
+        else:
+            return preset
+    
     def start_streaming(self):
         """Start FFmpeg streaming process with diagnostics."""
         if self.is_streaming:
@@ -174,15 +224,17 @@ class MediaMTXStreamer:
             ]
             
             # Hardware-specific settings
+            encoder_preset = self._map_preset_to_encoder(self.encoder_preset, codec)
+            
             if 'nvenc' in codec:
-                # NVIDIA: Use preset, tune for low latency
-                ffmpeg_cmd.extend(['-preset', self.encoder_preset, '-tune', 'zerolatency'])
+                # NVIDIA: Use mapped preset (nvenc doesn't support -tune option)
+                ffmpeg_cmd.extend(['-preset', encoder_preset])
             elif 'qsv' in codec or 'vaapi' in codec:
-                # Intel/AMD: Use preset if supported
-                ffmpeg_cmd.extend(['-preset', self.encoder_preset])
+                # Intel/AMD: Use mapped preset
+                ffmpeg_cmd.extend(['-preset', encoder_preset])
             elif codec == 'libx264':
-                # Software: Full control
-                ffmpeg_cmd.extend(['-preset', self.encoder_preset, '-tune', 'zerolatency'])
+                # Software: Full control with tuning
+                ffmpeg_cmd.extend(['-preset', encoder_preset, '-tune', 'zerolatency'])
             
             # Common settings
             ffmpeg_cmd.extend([
