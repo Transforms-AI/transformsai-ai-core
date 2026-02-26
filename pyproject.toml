@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transformsai-ai-core"
-version = "3.0.3"
+version = "3.0.4"
 description = "TransformsAI Core Library - Utilities for AI vision applications"
 readme = "README.md"
 authors = [
@@ -13,7 +13,7 @@ authors = [
 ]
 license = { file = "LICENSE" }
 # Set a more compatible Python version. Only increase this if you use newer features.
-requires-python = ">=3.10,<3.13"
+requires-python = "==3.11.*"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -26,7 +26,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# Core dependencies with minimum compatible versions for broad usability
+# Core dependencies 
+# NOTE: Most of them doesn't have version constraints to allow end projects to manage their own versions. Only add version constraints if there are known compatibility issues.
 dependencies = [
     "opencv-python",
     "numpy",
@@ -40,6 +41,8 @@ dependencies = [
     "loguru",
     "pydantic",
     "gdown",
+    "ultralytics",
+    "clip",
 ]
 
 [project.optional-dependencies]
@@ -51,19 +54,14 @@ trt = [
     "tensorrt-cu12>=10.13.3.9",
     "torch", 
     "torchvision", 
-    "ultralytics",
-    "clip",
 ]
 
 # RKNN option
 rknn = [
     "rknn-toolkit-lite2>=2.3.2; sys_platform != 'darwin'",
-    # "rknn-toolkit2>=2.3.2; sys_platform != 'darwin'", Removed, only needed for export, isn't supported on aarch
     "numpy<2",
     "torch<=2.2.1",
     "torchvision", 
-    "ultralytics",
-    "clip",
 ]
 
 # ONNX option
@@ -73,21 +71,6 @@ onnx = [
     "onnxslim",
     "torch", 
     "torchvision", 
-    "ultralytics",
-    "clip",
-]
-
-# All option - includes everything
-all = [
-    "onnx",
-    "onnxruntime-gpu",
-    "onnxslim",
-    "tensorrt-cu12>=10.13.3.9",
-    # "rknn-toolkit-lite2>=2.3.2; sys_platform == 'aarch64'",
-    "ultralytics",
-    "torch", 
-    "torchvision",
-    "clip",
 ]
 
 # --- Setuptools Configuration (Replaces setup.cfg and MANIFEST.in) ---
@@ -102,7 +85,6 @@ include-package-data = true
 [tool.uv]
 conflicts = [
     [
-        { extra = "all" },
         { extra = "rknn" },
         { extra = "trt" },
         { extra = "onnx" },
