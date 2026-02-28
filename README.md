@@ -805,7 +805,7 @@ def camera_io_worker(stream_config: dict):
     last_collect = time.time()
     
     while True:
-        grabbed, frame = capture.read(copy=False)
+        grabbed, frame = capture.read(copy=True)
         if not grabbed:
             time.sleep(0.1)
             continue
@@ -837,7 +837,6 @@ def main():
     config = process_config(
         "config.yaml",
         resolve_models=True,      # Resolve model paths
-        download_models=False     # Set True to auto-download missing models
     )
     
     # Extract config sections
