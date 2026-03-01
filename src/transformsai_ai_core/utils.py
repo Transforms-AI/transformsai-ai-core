@@ -246,19 +246,56 @@ def get_legend_layout(classes, class_to_label, text_scale, dot_size, padding=15,
     legend_h = total_text_h + padding
     return legend_w, legend_h, rows, padding, line_spacing, font, text_thickness
 
-def draw_common_elements(frame, boxes, classes, line_thickness):
-    """Draws the boxes (common to all versions)."""
+def draw_common_elements(frame, boxes, classes, line_thickness, ids=None, text_scale=0.6):
+    """Draws the boxes and optional IDs (common to all versions)."""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    text_thickness = max(1, int(text_scale * 2))
+    
     for i, box in enumerate(boxes):
         x_min, y_min, x_max, y_max = [int(c) for c in box]
         color = PALETTE[classes[i] % len(PALETTE)]
+        
+        # Draw bounding box
         cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), color, line_thickness)
+        
+        # Draw ID if provided and not None
+        if ids is not None and i < len(ids) and ids[i] is not None:
+            id_text = str(ids[i])
+            (t_w, t_h), baseline = cv2.getTextSize(id_text, font, text_scale, text_thickness)
+            
+            padding = 2
+            bg_w = t_w + padding * 2
+            bg_h = t_h + padding * 2
+            
+            # Anchor at top-left. Prefer outside (above) but fallback to inside if it clips the frame
+            if y_min - bg_h >= 0:
+                bg_y1 = y_min - bg_h
+                bg_y2 = y_min
+                text_y = y_min - padding
+            else:
+                bg_y1 = y_min
+                bg_y2 = y_min + bg_h
+                text_y = y_min + t_h + padding
+                
+            bg_x1 = x_min
+            bg_x2 = x_min + bg_w
+            
+            # Draw filled background box (same color as bounding box)
+            cv2.rectangle(frame, (bg_x1, bg_y1), (bg_x2, bg_y2), color, -1)
+            
+            # Calculate opposite color (255 - B, 255 - G, 255 - R)
+            opp_color = (255 - color[0], 255 - color[1], 255 - color[2])
+            
+            # Draw ID text
+            text_x = x_min + padding
+            cv2.putText(frame, id_text, (text_x, text_y), font, text_scale, opp_color, text_thickness, cv2.LINE_AA)
 
 def draw_boxes(frame, boxes, classes, class_to_label, confidences=None, # NOTE: for legacy support
                        line_thickness=2, legend_pos='top-right', legend_opacity=0.6, 
                        legend_corner_radius=15, text_scale=0.6, dot_size=6,
-                       auto_scale=True, scale_reference_width=1920):
+                       auto_scale=True, scale_reference_width=1920, ids=None):
     """
-    Draws bounding boxes and a glass-morphism legend on a frame.
+    Draws bounding boxes, optional IDs, and a glass-morphism legend on a frame.
 
     Args:
         frame (np.ndarray): Input image (BGR).
@@ -274,9 +311,10 @@ def draw_boxes(frame, boxes, classes, class_to_label, confidences=None, # NOTE: 
         dot_size (int): Base legend dot size. Default: 6.
         auto_scale (bool): Enable automatic scaling based on frame width. Default: True.
         scale_reference_width (int): Reference width for scaling (e.g., 1920 for Full HD). Default: 1920.
+        ids (list, optional): List of IDs corresponding to each box. Use None for boxes without an ID. Default: None.
 
     Returns:
-        np.ndarray: Frame with boxes and legend drawn.
+        np.ndarray: Frame with boxes, IDs, and legend drawn.
     """
     frame_h, frame_w = frame.shape[:2]
     
@@ -292,7 +330,8 @@ def draw_boxes(frame, boxes, classes, class_to_label, confidences=None, # NOTE: 
         padding = 15
         line_spacing = 10
     
-    draw_common_elements(frame, boxes, classes, line_thickness)
+    # Pass the ids and scaled text_scale to the drawing helper
+    draw_common_elements(frame, boxes, classes, line_thickness, ids=ids, text_scale=text_scale)
     if not classes: return frame
 
     l_w, l_h, rows, pad, space, font, thick = get_legend_layout(classes, class_to_label, text_scale, dot_size, padding, line_spacing)
@@ -311,7 +350,7 @@ def draw_boxes(frame, boxes, classes, class_to_label, confidences=None, # NOTE: 
     # 1. Downscale by 4x (0.25)
     small_roi = cv2.resize(roi, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_NEAREST)
     
-    # 2. Blur small image (Tiny kernel is sufficient now)
+    # 2. Blur small image 
     blurred_small = cv2.GaussianBlur(small_roi, (5, 5), 0)
     
     # 3. Upscale back
