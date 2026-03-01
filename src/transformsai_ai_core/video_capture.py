@@ -13,7 +13,8 @@ __author__ = "TransformsAI"
 class VideoCaptureAsync:
     """
     Asynchronous video capture class with robust handling for different source types
-    (files vs. streams), optional looping for files, and automatic restart on failure.
+    (USB, RTSP, Files). Automatically applies optimal backends, buffer sizes, and 
+    hardware settings based on the detected source type.
     """
 
     VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}
@@ -27,282 +28,172 @@ class VideoCaptureAsync:
         heartbeat_config=None, 
         auto_restart_on_fail=False, 
         restart_delay=30.0,
-        buffer_size=1,  # Minimize OpenCV internal buffer (critical for HEVC)
-        opencv_backend="auto",  # 'auto', 'ffmpeg', 'gstreamer', or None
-        max_frame_age_ms=100,  # Drop frames older than this (ms) (None = no limit)
-        auto_resize=True,  # Resize frames in read() if dimensions don't match width/height
-        hw_decode=False  # Attempt hardware decode acceleration (auto-fallback to software)
+        buffer_size=1,
+        opencv_backend="auto",
+        max_frame_age_ms=100,
+        auto_resize=True,
+        hw_decode=False
     ):
-        self.src = src
+        # Cast string integers to actual ints for proper USB detection
+        self.src = int(src) if isinstance(src, str) and src.isdigit() else src
         self.width = width
         self.height = height
         self.auto_resize = auto_resize
         self.hw_decode = hw_decode
         self.driver = driver
-        self._is_file_source = self._check_if_file_source(src)
+        
+        self.source_type = self._detect_source_type(self.src)
+        self._is_file_source = (self.source_type == 'FILE')
         self.loop = True if self._is_file_source else False 
 
         self.auto_restart_on_fail = auto_restart_on_fail
         self.restart_delay = restart_delay
-        
-        # HEVC optimization parameters
         self.buffer_size = buffer_size
         self.opencv_backend = opencv_backend
         self.max_frame_age_ms = max_frame_age_ms
 
+        # State variables
         self.cap = None
         self.started = False
         self._grabbed = False
         self._frame = None
-        self._frame_timestamp = 0  # Track when frame was captured
+        self._frame_timestamp = 0
+        self._frame_id = 0  # Tracks unique frames
         self._read_lock = threading.Lock()
         self._thread = None
         self._fps = 30.0
         self._last_frame_time = 0
         self._frame_count = 0
         self._stop_event = threading.Event()
-        self._dropped_frames = 0  # Track frames dropped due to age
 
         self._heartbeat_config = heartbeat_config or {}
         self._data_uploader = None
-        self._last_heartbeat_time = 0
-        self._debug_frame_count = 0  # Initialize to avoid dynamic attribute lookup on every frame
-        
         self.logger = get_logger(self)
 
         if self._heartbeat_config.get('enabled', False):
             self._initialize_heartbeat()
 
         try:
-            self._initialize_capture() # First attempt to initialize, should raise error if failed. Heartbeat is handled by _update
-            # Didn't raise, so capture is initialized successfully.
+            self._initialize_capture()
             self._send_heartbeat(f"Video source {self.src} initialized successfully.")
         except RuntimeError as e:
             if not self.auto_restart_on_fail:
-                self._send_heartbeat(f"Video source {self.src} initialization was failed, auto_restart is disabled.")
+                self._send_heartbeat(f"Video source {self.src} initialization failed.")
                 raise
             else:
-                # The _update thread (when start() is called) will handle restart attempts if auto restart is enabled.
-                self.logger.warning(
-                    f"[{self.src}] Initial capture failed: {e}. "
-                    f"auto_restart_on_fail is True, will attempt restart when capture is started."
-                )
+                self.logger.warning(f"[{self.src}] Initial capture failed: {e}. Will retry in thread.")
+
+    @property
+    def frame_id(self):
+        """Returns the ID of the latest grabbed frame to prevent duplicate processing."""
+        with self._read_lock:
+            return self._frame_id
+
+    def _detect_source_type(self, src) -> str:
+        """Classifies the video source to apply specific optimizations."""
+        if isinstance(src, int) or (isinstance(src, str) and src.startswith('/dev/video')):
+            return 'USB'
+        if isinstance(src, str):
+            if src.startswith(('rtsp://', 'http://', 'https://', 'udp://', 'tcp://')):
+                return 'NETWORK'
+            _, ext = os.path.splitext(src)
+            if ext.lower() in self.VIDEO_EXTENSIONS:
+                return 'FILE'
+        return 'UNKNOWN'
 
     def _initialize_heartbeat(self):
         try:
-            uploader_config = self._heartbeat_config.get('uploader_config', {})
-            self._data_uploader = DataUploader(
-                **uploader_config
-            )
-            self._last_heartbeat_time = 0
-            self.logger.info(f"[{self.src}] Heartbeat functionality initialized.")
+            self._data_uploader = DataUploader(**self._heartbeat_config.get('uploader_config', {}))
+            self.logger.info(f"[{self.src}] Heartbeat initialized.")
         except Exception as e:
-            self.logger.error(f"[{self.src}] Failed to initialize heartbeat: {e}")
+            self.logger.error(f"[{self.src}] Heartbeat init failed: {e}")
             self._data_uploader = None
 
     def _send_heartbeat(self, custom_message=None):
-        if not self._data_uploader or not self._heartbeat_config.get('enabled', False):
-            return
-
-        current_time = time.time()
-        sn = self._heartbeat_config.get('sn', f"capture_{self.src}")
-        
-        self._data_uploader.send_heartbeat(sn, time_to_string(current_time), status_log=custom_message)
-        self.logger.info(f"[{sn}] Heartbeat sent: {custom_message if custom_message else 'No custom message provided'}")
-        
-        return
-
-    def _check_if_file_source(self, source):
-        if isinstance(source, str):
-            _, ext = os.path.splitext(source)
-            if ext.lower() in self.VIDEO_EXTENSIONS:
-                return os.path.exists(source)
-        return False
+        if self._data_uploader and self._heartbeat_config.get('enabled', False):
+            sn = self._heartbeat_config.get('sn', f"capture_{self.src}")
+            self._data_uploader.send_heartbeat(sn, time_to_string(time.time()), status_log=custom_message)
 
     def _initialize_capture(self):
-        """
-        Initializes or re-initializes the cv2.VideoCapture object.
-        Raises RuntimeError on critical failure.
-        Sets self._fps, self._frame_count.
-        """
-        try:
-            if self.cap is not None: # Release existing capture if we are re-initializing
-                self.cap.release()
-                self.cap = None
+        """Opens the capture device and applies source-specific hardware optimizations."""
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
             
-            self.logger.debug(f"[{self.src}] Attempting to open capture source.")
-           
-            # Select OpenCV backend for optimal HEVC decoding
-            backend = cv2.CAP_ANY  # Default
-            if self.opencv_backend == 'ffmpeg':
-                backend = cv2.CAP_FFMPEG
-            elif self.opencv_backend == 'gstreamer':
-                backend = cv2.CAP_GSTREAMER
-            
-            if self.opencv_backend and self.opencv_backend != "auto":
-                self.cap = cv2.VideoCapture(self.src, backend)
-            else:
-                self.cap = cv2.VideoCapture(self.src)
+        # 1. Select optimal backend
+        backend = cv2.CAP_ANY
+        if self.opencv_backend != "auto":
+            backend_map = {'ffmpeg': cv2.CAP_FFMPEG, 'gstreamer': cv2.CAP_GSTREAMER, 'v4l2': cv2.CAP_V4L2}
+            backend = backend_map.get(self.opencv_backend.lower(), cv2.CAP_ANY)
+        elif self.source_type == 'USB':
+            backend = cv2.CAP_V4L2
+        elif self.source_type == 'NETWORK':
+            backend = cv2.CAP_FFMPEG
 
-            if not self.cap.isOpened():
-                raise RuntimeError(f"Could not open video source: {self.src}")
-            
-            # Critical: Minimize buffer to prevent HEVC frame accumulation
-            if self.buffer_size is not None:
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, self.buffer_size)
-                self.logger.debug(f"[{self.src}] Set buffer size to {self.buffer_size}")
-            
-            # Enable hardware decode if requested
-            if self.hw_decode:
-                try:
-                    self.cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
-                    self.logger.debug(f"[{self.src}] Hardware decode requested")
-                except Exception as e:
-                    self.logger.warning(f"[{self.src}] Failed to enable hardware decode: {e}")
+        self.cap = cv2.VideoCapture(self.src, backend)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Could not open video source: {self.src}")
 
-            fps = self.cap.get(cv2.CAP_PROP_FPS)
-            if fps is not None and fps > 0:
-                self._fps = fps
-            else:
-                self._fps = 30.0 # Fallback default
-                self.logger.warning(f"[{self.src}] Fallback FPS to {self._fps} due to detection failure.")
+        # 2. Apply Source-Specific Optimizations
+        if self.source_type == 'USB':
+            # Force MJPG compression to save USB bandwidth (crucial for high-res/FPS)
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            # Set hardware resolution BEFORE reading to prevent CPU downscaling
+            if self.width and self.height:
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
             
-            self._frame_count = 0
-            if self._is_file_source:
-                frame_count = self.cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                if frame_count > 0:
-                    self._frame_count = int(frame_count)
-                self.logger.info(f"[{self.src}] Initialized video file source: "
-                             f"(FPS: {self._fps:.2f}, Frames: {self._frame_count})")
-            else:
-                self.logger.info(f"[{self.src}] Initialized stream/camera source (FPS: {self._fps:.2f})")
-            
-            # Verify and log hardware decode status
-            if self.hw_decode:
-                self._verify_hw_decode()
+        if self.source_type in ('USB', 'NETWORK') and self.buffer_size is not None:
+            # Minimize internal buffer to prevent latency/stale frames
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, self.buffer_size)
 
-        except Exception as e:
-            # Ensure cap is None if initialization failed partway
-            if self.cap is not None:
-                self.cap.release()
-                self.cap = None
-            raise RuntimeError(f"Capture initialization failed for {self.src}: {e}") from e
-    
-    def _verify_hw_decode(self):
-        """Query and log actual hardware decode configuration."""
-        if not self.cap or not self.cap.isOpened():
-            return
+        if self.hw_decode:
+            try:
+                self.cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
+            except Exception:
+                pass
+
+        # 3. Flush stale hardware buffers for live cameras
+        if self.source_type == 'USB':
+            for _ in range(4):
+                self.cap.grab()
+
+        # 4. Extract metadata
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        self._fps = fps if fps and fps > 0 else 30.0
         
-        try:
-            # Query actual backend
-            backend_id = int(self.cap.get(cv2.CAP_PROP_BACKEND))
-            backend_map = {
-                cv2.CAP_FFMPEG: "FFmpeg",
-                cv2.CAP_GSTREAMER: "GStreamer",
-                cv2.CAP_ANY: "Auto"
-            }
-            backend_name = backend_map.get(backend_id, f"Unknown({backend_id})")
+        if self._is_file_source:
+            self._frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
             
-            # Query HW acceleration status
-            hw_accel = self.cap.get(cv2.CAP_PROP_HW_ACCELERATION)
-            hw_status = "ENABLED" if hw_accel and hw_accel > 0 else "DISABLED"
-            
-            # Query codec
-            fourcc = int(self.cap.get(cv2.CAP_PROP_FOURCC))
-            codec = "".join([chr((fourcc >> 8 * i) & 0xFF) for i in range(4)]) if fourcc else "unknown"
-            
-            # Get resolution
-            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            
-            self.logger.info(
-                f"[{self.src}] Decode config: backend={backend_name}, "
-                f"hw_accel={hw_status}, codec={codec}, resolution={width}x{height}"
-            )
-            
-            # Log OpenCV build info once per class (check for HW support)
-            if not hasattr(self.__class__, '_build_info_logged'):
-                build_info = cv2.getBuildInformation()
-                hw_features = []
-                for line in build_info.split('\n'):
-                    line = line.strip()
-                    if any(keyword in line for keyword in ['CUDA', 'VA-API', 'Video', 'FFmpeg', 'GStreamer']):
-                        hw_features.append(line)
-                if hw_features:
-                    self.logger.debug(f"OpenCV HW capabilities: {'; '.join(hw_features[:5])}")  # Limit to 5 lines
-                self.__class__._build_info_logged = True
-                
-        except Exception as e:
-            self.logger.warning(f"[{self.src}] Failed to query decode properties: {e}")
+        self.logger.info(f"[{self.src}] Initialized {self.source_type} source (FPS: {self._fps:.2f})")
 
     def get_height_width(self):
-        """
-        Returns the height and width of the video capture source.
-        If not initialized, returns (None, None).
-        """
         if self.cap and self.cap.isOpened():
-            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            return height, width
+            return int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)), int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         return None, None
 
+    def get(self, propId):
+        return self.cap.get(propId) if self.cap else None
+
+    def set(self, propId, value):
+        return self.cap.set(propId, value) if self.cap else False
+
     def _attempt_restart_capture(self):
-        """
-        Attempts to re-initialize the video capture. Manages heartbeats for restart status.
-        Returns True if restart was successful and capture is open, False otherwise.
-        """
         self.logger.info(f"[{self.src}] Attempting to restart capture...")
         try:
             self._initialize_capture()
             if self.cap and self.cap.isOpened():
-                self.logger.info(f"[{self.src}] Successfully restarted capture.")
-                self._send_heartbeat(f"Video capture for {self.src} recovered after restart.")
-                self._last_frame_time = 0 # Reset frame timer for file sources
-                self._grabbed = False # Ensure read() waits for a new frame
-                self._frame = None
+                self._send_heartbeat(f"Video capture for {self.src} recovered.")
+                self._last_frame_time = 0
+                self._grabbed = False
                 return True
-            else:
-                # This case implies _initialize_capture didn't raise but cap is not open.
-                err_msg = f"Re-initialization completed, but capture {self.src} is not open (unexpected)."
-                self.logger.error(f"[{self.src}] {err_msg}")
-                self._send_heartbeat(err_msg)
-                return False
-        except RuntimeError as e: # Raised by _initialize_capture on hard failure
-            self.logger.error(f"[{self.src}] Error during restart attempt: {e}")
-            self._send_heartbeat(str(e)) # Send error heartbeat
-            return False
-
-    def get(self, propId):
-        if self.cap:
-            return self.cap.get(propId)
-        return None
-
-    def set(self, propId, value):
-        if self.cap:
-            return self.cap.set(propId, value)
+        except Exception as e:
+            self.logger.error(f"[{self.src}] Restart failed: {e}")
         return False
 
     def start(self, loop=None):
         if self.started:
-            self.logger.warning(f'[{self.src}] Asynchronous video capturing has already been started.')
             return self
-
-        if not self.cap or not self.cap.isOpened():
-            if not self.auto_restart_on_fail:
-                # If not auto-restarting, then it's an error to start if cap is not ready.
-                error_msg = (f"Capture device {self.src} not initialized or already released. "
-                             f"Cannot start (auto_restart_on_fail is False).")
-                self.logger.error(f"[{self.src}] {error_msg}")
-                self._send_heartbeat(error_msg)
-                return self
-            else:
-                # If auto_restart_on_fail is True, it's okay if cap is not open yet.
-                # The _update thread will handle the initial attempt to open/restart.
-                self.logger.info(
-                    f"[{self.src}] Capture device not yet open, but auto_restart_on_fail is True. "
-                    f"Proceeding to start thread for restart attempts."
-                )
-
         if loop is not None and self._is_file_source:
             self.loop = loop
 
@@ -310,196 +201,121 @@ class VideoCaptureAsync:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._update, name=f"VideoCaptureAsync_{self.src}", daemon=True)
         self._thread.start()
-        self.logger.info(f"[{self.src}] Started video capture thread.")
         return self
 
     def _update(self):
-        is_file = self._is_file_source
         target_frame_duration = 1.0 / self._fps if self._fps > 0 else 0
+        consecutive_fails = 0
 
         while not self._stop_event.is_set():
-            # --- Phase 1: Ensure capture is initialized and open ---
+            # Phase 1: Ensure capture is open
             if not self.cap or not self.cap.isOpened():
-                initial_error_msg = f"Capture {self.src} not open/initialized prior to read."
-                # Heartbeat for this specific state will be handled by restart logic or if restart is off
-
                 if self.auto_restart_on_fail:
-                    self.logger.warning(f"[{self.src}] {initial_error_msg} Attempting auto-restart.")
-                    restarted_successfully = False
-                    while not self._stop_event.is_set(): # Inner restart loop
-                        if self._attempt_restart_capture(): # Handles its own heartbeats
-                            restarted_successfully = True
-                            break # Exit inner restart loop, proceed to read
-                        else: # Restart attempt failed
-                            if self._stop_event.is_set(): break 
-                            self.logger.info(f"[{self.src}] Waiting {self.restart_delay}s before next restart attempt.")
-                            self._stop_event.wait(self.restart_delay)
-                    
-                    if not restarted_successfully:
-                        self.logger.error(f"[{self.src}] Auto-restart failed or was interrupted. Stopping thread.")
-                        self._send_heartbeat(f"Failed to restart video capture for {self.src} after multiple attempts.")
-                        break 
-                else: # Not auto-restarting, and cap is bad
-                    self._send_heartbeat(f"Auto-restart is disabled for {self.src}. Capture not open.")
-                    self.logger.error(f"[{self.src}] {initial_error_msg} Auto-restart disabled. Stopping thread.")
-                    break 
-            
-            # --- Phase 2: Attempt to read frame ---
-            grabbed = False
-            frame = None
-            attempted_read_this_cycle = False # For file source timing
+                    if not self._attempt_restart_capture():
+                        self._stop_event.wait(self.restart_delay)
+                        continue
+                else:
+                    break
 
+            # Phase 2: Read frame based on source type
+            grabbed, frame = False, None
             try:
-                if is_file:
+                if self._is_file_source:
+                    # Paced reading for files
                     current_time = time.monotonic()
-                    time_since_last = current_time - self._last_frame_time
-                    if time_since_last >= target_frame_duration or self._last_frame_time == 0:
-                        attempted_read_this_cycle = True
+                    if (current_time - self._last_frame_time) >= target_frame_duration or self._last_frame_time == 0:
                         grabbed, frame = self.cap.read()
-                        if not grabbed: # End of file or read error
-                            if self.loop and self._frame_count > 0:
-                                self.logger.info(f"[{self.src}] Looping video file.")
-                                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                                grabbed, frame = self.cap.read()
-                                if grabbed:
-                                    self._last_frame_time = time.monotonic()
-                                # If still not grabbed, it's a read failure handled below
-                            else: # End of file and not looping
-                                self.logger.info(f"[{self.src}] End of video file reached (not looping).")
-                                break # Exit _update loop
-                        else: # Frame grabbed successfully from file
+                        if not grabbed and self.loop:
+                            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                            grabbed, frame = self.cap.read()
+                        if grabbed:
                             self._last_frame_time = current_time
-                    else: # Not enough time passed for file source
-                        sleep_time = target_frame_duration - time_since_last
-                        if sleep_time > 0.001:
-                           self._stop_event.wait(sleep_time) # Interruptible sleep
-                        continue # Skip to next iteration
-                else: # Stream/Camera source
-                    attempted_read_this_cycle = True
-                    grabbed, frame = self.cap.read()
+                    else:
+                        self._stop_event.wait(0.005)
+                        continue
+                else:
+                    # Live sources (USB/Network): Separate grab/retrieve to clear hardware buffers fast
+                    grabbed = self.cap.grab()
+                    if grabbed:
+                        ret, frame = self.cap.retrieve()
+                        if not ret: grabbed = False
 
-                # --- Phase 3: Handle read outcome ---
-                if attempted_read_this_cycle:
-                    if not grabbed: # Read failure (stream, or file after loop attempt)
-                        error_msg = f"Failed to grab frame from source: {self.src}."
-                        self.logger.warning(f"[{self.src}] {error_msg}")
-                        self._send_heartbeat(error_msg)
-
+                # Phase 3: Handle outcome
+                if not grabbed:
+                    consecutive_fails += 1
+                    # Tolerate minor drops (up to 30 frames) before full restart
+                    if consecutive_fails > 30:
+                        self.logger.warning(f"[{self.src}] 30 consecutive read failures. Restarting.")
                         if self.auto_restart_on_fail:
-                            if self.cap: self.cap.release(); self.cap = None # Invalidate cap
-                            self.logger.info(f"[{self.src}] Marked capture for restart due to read failure.")
-                            continue # Go to top of _update loop, Phase 1 will handle restart
-                        else: # Not auto-restarting after read failure
-                            if not is_file: # Stream: delay and let loop retry read on next iter
-                                self._stop_event.wait(0.1)
-                            # For looping file that failed read and no auto-restart: error logged, will keep trying.
-                            continue # Try reading again or sleep
-                    else: # Frame successfully grabbed
-                        with self._read_lock:
-                            self._grabbed = True
-                            self._frame = frame
-                            self._frame_timestamp = time.time()
+                            self.cap.release()
+                            self.cap = None
+                            consecutive_fails = 0
+                            continue
+                        else:
+                            break
+                    else:
+                        self._stop_event.wait(0.01)
+                        continue
+                else:
+                    consecutive_fails = 0
+                    with self._read_lock:
+                        self._grabbed = True
+                        self._frame = frame
+                        self._frame_timestamp = time.time()
+                        self._frame_id += 1
 
-            except cv2.error as e:
-                error_msg = f"OpenCV error during capture from {self.src}: {e}"
-                self.logger.error(f"[{self.src}] {error_msg}")
-                self._send_heartbeat(error_msg)
+            except Exception as e:
+                self.logger.error(f"[{self.src}] Capture error: {e}")
                 if self.auto_restart_on_fail:
                     if self.cap: self.cap.release(); self.cap = None
-                    self.logger.info(f"[{self.src}] Marked capture for restart due to OpenCV error.")
-                    continue # Let Phase 1 handle restart
-                else:
-                    self._stop_event.wait(0.1) # Brief pause before retrying
                     continue
-            except Exception as e:
-                error_msg = f"Unexpected error in capture thread for {self.src}: {e}"
-                self.logger.exception(f"[{self.src}] {error_msg}") # Use .exception for stack trace
-                self._send_heartbeat(error_msg)
-                break # Exit loop on critical unexpected errors
+                break
 
         self.started = False
-        self.logger.info(f"[{self.src}] Video capture thread stopped.")
-        # Send a final heartbeat indicating stopped status if it wasn't due to an error already reported
-        if not self._stop_event.is_set(): # if stopped due to natural end (e.g. non-looping file)
-             self._send_heartbeat(f"Video capture {self.src} thread stopped normally.")
-
 
     def read(self, wait_for_frame=False, timeout=1.0, copy=True):
         """
-        Read the latest captured frame.
-        
-        Args:
-            wait_for_frame (bool): If True, wait for first frame with timeout. Default: False.
-            timeout (float): Timeout in seconds when waiting for first frame. Default: 1.0.
-            copy (bool): If True, return a copy of the frame. If False, return reference directly
-                        (faster but caller must not modify). Default: True for backward compatibility.
-        
-        Returns:
-            tuple: (grabbed, frame) where grabbed is bool and frame is np.ndarray or None.
+        Returns (grabbed, frame). 
+        Maintains exact interface compatibility while utilizing internal optimizations.
         """
         if wait_for_frame and not self._grabbed and self.started:
             start_time = time.monotonic()
             while not self._grabbed and self.started:
-                if time.monotonic() - start_time > timeout:
-                    error_msg = f"Timeout waiting for first frame from {self.src}"
-                    self.logger.warning(f"[{self.src}] {error_msg}")
-                    return False, None
-                if self._stop_event.is_set():
+                if time.monotonic() - start_time > timeout or self._stop_event.is_set():
                     return False, None
                 time.sleep(0.005)
 
         with self._read_lock:
-            # Optimized: avoid copy if caller specifies copy=False (saves ~6MB for 1080p)
             frame = self._frame.copy() if (self._grabbed and self._frame is not None and copy) else self._frame
             grabbed = self._grabbed
         
-        # Auto-resize if enabled and dimensions don't match target
+        # Software resize fallback (only triggers if hardware resize wasn't possible)
         if grabbed and frame is not None and self.auto_resize and self.width and self.height:
-            current_h, current_w = frame.shape[:2]
-            if current_w != self.width or current_h != self.height:
-                # Use INTER_AREA for files (better quality), INTER_LINEAR for streams (more robust)
+            h, w = frame.shape[:2]
+            if w != self.width or h != self.height:
                 interp = cv2.INTER_AREA if self._is_file_source else cv2.INTER_LINEAR
                 frame = cv2.resize(frame, (self.width, self.height), interpolation=interp)
-        
-        # Debug log frame info periodically (now using pre-initialized counter)
-        if grabbed and frame is not None:
-            self._debug_frame_count += 1
-            if self._debug_frame_count % 1000 == 0:  # Every 1000 frames
-                self.logger.debug(f"[{self.src}] Frame {self._debug_frame_count}: shape={frame.shape}, dtype={frame.dtype}")
-            elif self._debug_frame_count == 1:
-                self.logger.debug(f"[{self.src}] First frame: shape={frame.shape}, dtype={frame.dtype}")
         
         return grabbed, frame
 
     def stop(self):
-        if not self.started:
-            return
-        self.logger.info(f"[{self.src}] Stopping video capture thread...")
-        self._stop_event.set()
+        if self.started:
+            self._stop_event.set()
 
     def release(self):
-        if self._data_uploader: self._data_uploader.shutdown()
         self.stop()
-        if self._thread is not None and self._thread.is_alive():
-             self._thread.join(timeout=max(2.0, self.restart_delay + 1.0)) # Ensure join timeout is sufficient
-             if self._thread.is_alive():
-                 self.logger.warning(f"[{self.src}] Capture thread did not stop gracefully.")
+        if self._thread and self._thread.is_alive():
+             self._thread.join(timeout=max(2.0, self.restart_delay + 1.0))
 
-        if self.cap is not None:
-            try:
-                self.cap.release()
-                self.logger.info(f"[{self.src}] Released video capture device.")
-            except Exception as e:
-                error_msg = f"Error releasing capture device for {self.src}: {e}"
-                self.logger.error(f"[{self.src}] {error_msg}")
-        
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+            
         if self._data_uploader:
             try:
-                self._data_uploader.shutdown(wait=False) # Assuming DataUploader has shutdown
-            except Exception as e:
-                self.logger.error(f"[{self.src}] Error shutting down data uploader: {e}")
-        
-        self.cap = None
+                self._data_uploader.shutdown(wait=False)
+            except Exception:
+                pass
         self.started = False
 
     def __enter__(self):

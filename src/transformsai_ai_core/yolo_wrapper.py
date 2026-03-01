@@ -83,10 +83,6 @@ class _YOLOExportMixin:
             # Load original model temporarily for export
             temp_model = base_class(str(self.original_model_path), task=self.task)
             
-            # YOLOE-specific: set classes if needed
-            if hasattr(self, 'set_classes') and self.set_classes is not None:
-                temp_model.set_classes(self.set_classes, temp_model.get_text_pe(self.set_classes))
-            
             # Export with user-provided options
             export_result = temp_model.export(**self.export_options)
             
@@ -290,6 +286,57 @@ class YOLOEWrapper(_YOLOExportMixin, YOLOE):
                 self.exported_model_path = None
             else:
                 raise
+    
+    def _prepare_model(self, base_class) -> str:
+        """
+        Prepare model for loading: check for exported version or export if needed.
+        For YOLOE models with set_classes, applies classes before export.
+        
+        Args:
+            base_class: The ultralytics base class (YOLOE) for temporary loading
+        
+        Returns:
+            Path to model file to load (exported or original)
+        """
+        # If export not enabled, use original model
+        if not self.export_enabled:
+            return str(self.original_model_path)
+        
+        # Check if exported model already exists
+        export_format = self.export_options.get('format', 'onnx')
+        exported_path = self._get_expected_export_path(export_format)
+        
+        if exported_path and exported_path.exists():
+            self.logger.info(f"Found existing exported model: {exported_path}")
+            self.exported_model_path = exported_path
+            return str(exported_path)
+        
+        # Export model if it doesn't exist
+        self.logger.info(f"Exporting model to {export_format} format...")
+        try:
+            # Load original model temporarily for export
+            temp_model = base_class(str(self.original_model_path), task=self.task)
+            
+            # YOLOE-specific: set classes before export if needed
+            if self.set_classes is not None:
+                temp_model.set_classes(self.set_classes, temp_model.get_text_pe(self.set_classes))
+            
+            # Export with user-provided options
+            export_result = temp_model.export(**self.export_options)
+            
+            # export() returns the path to exported model
+            self.exported_model_path = Path(export_result)
+            self.logger.info(f"Model exported successfully: {self.exported_model_path}")
+            
+            # Free memory immediately (critical for edge devices)
+            del temp_model
+            gc.collect()
+            
+            return str(self.exported_model_path)
+            
+        except Exception as e:
+            self.logger.error(f"Export failed, using original model: {e}")
+            return str(self.original_model_path)
     
     def predict(
         self,
