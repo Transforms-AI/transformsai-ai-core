@@ -32,15 +32,21 @@ class VideoCaptureAsync:
         opencv_backend="auto",
         max_frame_age_ms=100,
         auto_resize=True,
-        hw_decode=False
+        hw_decode=False,
+        fps=None
     ):
         # Cast string integers to actual ints for proper USB detection
         self.src = int(src) if isinstance(src, str) and src.isdigit() else src
         self.width = width
         self.height = height
+        self.target_fps = fps
         self.auto_resize = auto_resize
         self.hw_decode = hw_decode
         self.driver = driver
+        
+        # FPS control
+        self._min_frame_time = 1.0 / self.target_fps if self.target_fps else 0
+        self._last_retrieved_time = 0
         
         self.source_type = self._detect_source_type(self.src)
         self._is_file_source = (self.source_type == 'FILE')
@@ -237,8 +243,18 @@ class VideoCaptureAsync:
                     # Live sources (USB/Network): Separate grab/retrieve to clear hardware buffers fast
                     grabbed = self.cap.grab()
                     if grabbed:
-                        ret, frame = self.cap.retrieve()
-                        if not ret: grabbed = False
+                        # Only decode if enough time passed
+                        current_time = time.monotonic()
+                        if self.target_fps is None or (current_time - self._last_retrieved_time) >= self._min_frame_time:
+                            ret, frame = self.cap.retrieve()
+                            
+                            if not ret: 
+                                grabbed = False
+                            else: 
+                                self._last_retrieved_time = current_time
+                        else:
+                            # Grabbed buffer to clear it, but skip decoding to save CPU if we're ahead of schedule
+                            continue
 
                 # Phase 3: Handle outcome
                 if not grabbed:
