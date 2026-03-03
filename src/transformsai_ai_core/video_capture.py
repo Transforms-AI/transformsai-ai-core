@@ -65,9 +65,10 @@ class VideoCaptureAsync:
         self._frame = None
         self._frame_timestamp = 0
         self._frame_id = 0  # Tracks unique frames
-        self._read_lock = threading.Lock()
+        self._new_frame_condition = threading.Condition()
+        self._last_read_frame_id = -1 # Tracks the last frame sent to the consumer
         self._thread = None
-        self._fps = 30.0
+        self._fps = None
         self._last_frame_time = 0
         self._frame_count = 0
         self._stop_event = threading.Event()
@@ -166,7 +167,7 @@ class VideoCaptureAsync:
 
         # 4. Extract metadata
         fps = self.cap.get(cv2.CAP_PROP_FPS)
-        self._fps = fps if fps and fps > 0 else 30.0
+        self._fps = self.target_fps if self.target_fps else fps if fps and fps > 0 else 30.0
         
         if self._is_file_source:
             self._frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -210,109 +211,119 @@ class VideoCaptureAsync:
         return self
 
     def _update(self):
-        target_frame_duration = 1.0 / self._fps if self._fps > 0 else 0
-        consecutive_fails = 0
+            target_frame_duration = 1.0 / self._fps if self._fps > 0 else 0
+            consecutive_fails = 0
 
-        while not self._stop_event.is_set():
-            # Phase 1: Ensure capture is open
-            if not self.cap or not self.cap.isOpened():
-                if self.auto_restart_on_fail:
-                    if not self._attempt_restart_capture():
-                        self._stop_event.wait(self.restart_delay)
+            while not self._stop_event.is_set():
+                # Phase 1: Ensure capture is open
+                if not self.cap or not self.cap.isOpened():
+                    if self.auto_restart_on_fail:
+                        if not self._attempt_restart_capture():
+                            self._stop_event.wait(self.restart_delay)
+                            continue
+                    else:
+                        break
+
+                # Phase 2: Read frame based on source type
+                grabbed, frame = False, None
+                try:
+                    if self._is_file_source:
+                        # Paced reading for files
+                        current_time = time.monotonic()
+                        if (current_time - self._last_frame_time) >= target_frame_duration or self._last_frame_time == 0:
+                            grabbed, frame = self.cap.read()
+                            if not grabbed and self.loop:
+                                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                                grabbed, frame = self.cap.read()
+                            if grabbed:
+                                self._last_frame_time = current_time
+                        else:
+                            self._stop_event.wait(0.005)
+                            continue
+                    else:
+                        # Live sources (USB/Network): Separate grab/retrieve to clear hardware buffers fast
+                        grabbed = self.cap.grab()
+                        if grabbed:
+                            # Only decode if enough time passed
+                            current_time = time.monotonic()
+                            if self.target_fps is None or (current_time - self._last_retrieved_time) >= self._min_frame_time:
+                                ret, frame = self.cap.retrieve()
+                                
+                                if not ret: 
+                                    grabbed = False
+                                else: 
+                                    self._last_retrieved_time = current_time
+                            else:
+                                # Grabbed buffer to clear it, but skip decoding to save CPU if we're ahead of schedule
+                                continue
+
+                    # Phase 3: Handle outcome
+                    if not grabbed:
+                        consecutive_fails += 1
+                        # Tolerate minor drops (up to 30 frames) before full restart
+                        if consecutive_fails > 30:
+                            self.logger.warning(f"[{self.src}] 30 consecutive read failures. Restarting.")
+                            if self.auto_restart_on_fail:
+                                self.cap.release()
+                                self.cap = None
+                                consecutive_fails = 0
+                                continue
+                            else:
+                                break
+                        else:
+                            self._stop_event.wait(0.01)
+                            continue
+                    else:
+                        consecutive_fails = 0
+                        
+                        # Use the condition variable to update state and notify readers
+                        with self._new_frame_condition:
+                            self._grabbed = True
+                            self._frame = frame
+                            self._frame_timestamp = time.time()
+                            self._frame_id += 1
+                            self._new_frame_condition.notify_all() # Wake up any waiting read() calls
+
+                except Exception as e:
+                    self.logger.error(f"[{self.src}] Capture error: {e}")
+                    if self.auto_restart_on_fail:
+                        if self.cap: self.cap.release(); self.cap = None
                         continue
-                else:
                     break
 
-            # Phase 2: Read frame based on source type
-            grabbed, frame = False, None
-            try:
-                if self._is_file_source:
-                    # Paced reading for files
-                    current_time = time.monotonic()
-                    if (current_time - self._last_frame_time) >= target_frame_duration or self._last_frame_time == 0:
-                        grabbed, frame = self.cap.read()
-                        if not grabbed and self.loop:
-                            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                            grabbed, frame = self.cap.read()
-                        if grabbed:
-                            self._last_frame_time = current_time
-                    else:
-                        self._stop_event.wait(0.005)
-                        continue
-                else:
-                    # Live sources (USB/Network): Separate grab/retrieve to clear hardware buffers fast
-                    grabbed = self.cap.grab()
-                    if grabbed:
-                        # Only decode if enough time passed
-                        current_time = time.monotonic()
-                        if self.target_fps is None or (current_time - self._last_retrieved_time) >= self._min_frame_time:
-                            ret, frame = self.cap.retrieve()
-                            
-                            if not ret: 
-                                grabbed = False
-                            else: 
-                                self._last_retrieved_time = current_time
-                        else:
-                            # Grabbed buffer to clear it, but skip decoding to save CPU if we're ahead of schedule
-                            continue
+            self.started = False
 
-                # Phase 3: Handle outcome
-                if not grabbed:
-                    consecutive_fails += 1
-                    # Tolerate minor drops (up to 30 frames) before full restart
-                    if consecutive_fails > 30:
-                        self.logger.warning(f"[{self.src}] 30 consecutive read failures. Restarting.")
-                        if self.auto_restart_on_fail:
-                            self.cap.release()
-                            self.cap = None
-                            consecutive_fails = 0
-                            continue
-                        else:
-                            break
-                    else:
-                        self._stop_event.wait(0.01)
-                        continue
-                else:
-                    consecutive_fails = 0
-                    with self._read_lock:
-                        self._grabbed = True
-                        self._frame = frame
-                        self._frame_timestamp = time.time()
-                        self._frame_id += 1
+    def read(self, wait_for_new_frame=True, timeout=1.0, copy=True):
+            """
+            Returns (grabbed, frame). 
+            If wait_for_new_frame is True, it blocks until a fresh frame is decoded,
+            matching standard cv2.VideoCapture behavior and preventing CPU thrashing.
+            """
+            if not self.started:
+                return False, None
 
-            except Exception as e:
-                self.logger.error(f"[{self.src}] Capture error: {e}")
-                if self.auto_restart_on_fail:
-                    if self.cap: self.cap.release(); self.cap = None
-                    continue
-                break
-
-        self.started = False
-
-    def read(self, wait_for_frame=False, timeout=1.0, copy=True):
-        """
-        Returns (grabbed, frame). 
-        Maintains exact interface compatibility while utilizing internal optimizations.
-        """
-        if wait_for_frame and not self._grabbed and self.started:
-            start_time = time.monotonic()
-            while not self._grabbed and self.started:
-                if time.monotonic() - start_time > timeout or self._stop_event.is_set():
-                    return False, None
-                time.sleep(0.005)
-
-        with self._read_lock:
-            frame = self._frame.copy() if (self._grabbed and self._frame is not None and copy) else self._frame
-            grabbed = self._grabbed
-        
-        # Software resize fallback (only triggers if hardware resize wasn't possible)
-        if grabbed and frame is not None and self.auto_resize and self.width and self.height:
-            h, w = frame.shape[:2]
-            if w != self.width or h != self.height:
-                interp = cv2.INTER_AREA if self._is_file_source else cv2.INTER_LINEAR
-                frame = cv2.resize(frame, (self.width, self.height), interpolation=interp)
-        
-        return grabbed, frame
+            with self._new_frame_condition:
+                if wait_for_new_frame:
+                    # Wait until the background thread produces a frame we haven't read yet
+                    self._new_frame_condition.wait_for(
+                        lambda: self._frame_id > self._last_read_frame_id or self._stop_event.is_set(), 
+                        timeout=timeout
+                    )
+                
+                # Update the tracker so we don't read this exact frame again next time
+                self._last_read_frame_id = self._frame_id
+                
+                frame = self._frame.copy() if (self._grabbed and self._frame is not None and copy) else self._frame
+                grabbed = self._grabbed
+            
+            # Software resize fallback (only triggers if hardware resize wasn't possible)
+            if grabbed and frame is not None and self.auto_resize and self.width and self.height:
+                h, w = frame.shape[:2]
+                if w != self.width or h != self.height:
+                    interp = cv2.INTER_AREA if self._is_file_source else cv2.INTER_LINEAR
+                    frame = cv2.resize(frame, (self.width, self.height), interpolation=interp)
+            
+            return grabbed, frame
 
     def stop(self):
         if self.started:
