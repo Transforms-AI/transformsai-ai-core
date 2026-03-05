@@ -765,9 +765,9 @@ Production AI Pipeline Template
 This example demonstrates a complete multi-camera system with:
 - Config-driven initialization
 - Multi-threaded camera I/O with frame buffering
-- Periodic AI inference (YOLO detection/classification)
+- Periodic AI inference (YOLO or Custom)
 - Real-time streaming to MediaMTX
-- Smart data upload with debouncing
+- Data upload with debouncing
 - Graceful shutdown and state persistence
 """
 
@@ -887,12 +887,11 @@ def main():
         # Video capture
         capture = VideoCaptureAsync(
             src=cam_cfg["rtsp_url"],  # Built by process_config()
-            width=cam_cfg["settings"].get("width", 1920),
-            height=cam_cfg["settings"].get("height", 1080),
-            buffer_size=cam_cfg["capture"]["buffer_size"],
-            opencv_backend=cam_cfg["capture"]["opencv_backend"],
-            hw_decode=True,
-            auto_restart_on_fail=True,
+            width=cam_cfg["settings"]["resolution"].get("width", 1920),
+            height=cam_cfg["settings"]["resolution"].get("height", 1080),
+            buffer_size=cam_cfg["settings"]["buffer_size"],
+            hw_decode=cam_cfg["settings"]["hw_decode"],
+            fps=cam_cfg["settings"]["fps"]
         ).start()
         
         # MediaMTX streamer
@@ -905,8 +904,6 @@ def main():
                 fps=livestream_cfg.get("fps", 30),
                 frame_width=cam_cfg["settings"].get("width", 1920),
                 frame_height=cam_cfg["settings"].get("height", 1080),
-                encoder_preset=livestream_cfg["encoder"]["preset"],
-                stream_queue_size=livestream_cfg["encoder"]["queue_size"],
             ).start_streaming()
         
         # Frame buffer for AI processing
