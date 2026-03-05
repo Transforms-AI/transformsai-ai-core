@@ -110,11 +110,11 @@ cameras:
       ip: ""                        # str, default "": Camera IP address
       port: 554                     # int, default 554: RTSP port
       path: "/Streaming/Channels/101"  # str, default: RTSP stream path
-    capture:                        # CaptureSettings object
-      buffer_size: 1                # int, default 1: OpenCV buffer size
-      opencv_backend: null          # str|null, default null: 'auto'|'ffmpeg'|'gstreamer'
-      max_frame_age_ms: null        # int|null, default null: Drop frames older than (ms)
-    settings: {}                    # dict[str, Any]: Freeform per-camera settings
+    settings:                         # dict[str, Any]: Freeform per-camera settings
+      resolution:
+        height: 1280
+        width: 720
+      fps: 15
 
 # Advanced Configuration (AdvancedConfig)
 advanced:
@@ -135,6 +135,7 @@ advanced:
   timings:
     inference_interval: 0.033       # Example: Custom timing values
     datasend_interval: 120
+    frame_collection_interval: 0.05
     
   # Data Sending (DatasendConfig)
   datasend:
@@ -142,22 +143,19 @@ advanced:
     base_url: ""                    # str, default "": API base URL
     endpoints: {}                   # dict[str, str]: Freeform endpoint paths
     secret_keys: []                 # list[str], default []: API authentication keys
-    settings: {}                    # dict[str, Any]: Freeform settings
 
   # Livestream (LivestreamConfig)
   livestream:
     enabled: true                   # bool, default true: Master switch
     mediamtx_ip: "localhost"        # str, default "localhost": MediaMTX server IP
     rtsp_port: 8554                 # int, default 8554: MediaMTX RTSP port
-    encoder:                        # StreamEncoderSettings object
-      preset: "ultrafast"           # str, default "ultrafast": Encoder preset
-      codec: "copy"                 # str, default "copy": 'copy'|'libx264'
+    settings:                       # dict[str, Any]: Freeform settings
       queue_size: 2                 # int, default 2: Async frame queue depth
-    settings: {}                    # dict[str, Any]: Freeform settings
 
-  # Pipeline (dict[str, Any]): Freeform
+  # Pipeline (dict[str, Any]): Freeform, determined by project
   pipeline:
     tracking_threshold: 0.5         # All project-specific settings
+    camera_cpu_affinity: [0,1]
 ```
 
 ### `load_config(config_path: str | Path, validate: bool = True) -> dict`
@@ -177,22 +175,6 @@ from transformsai_ai_core import load_config
 config = load_config("config.yaml", validate=True)
 project_name = config["meta"]["name"]
 cameras = config["cameras"]
-```
-
-### `save_config(config_path: str | Path, config: dict) -> None`
-
-Save config dictionary to YAML file.
-
-**Parameters:**
-- `config_path`: str|Path - Output path
-- `config`: dict - Config dictionary
-
-**Usage:**
-```python
-from transformsai_ai_core import save_config
-
-config["meta"]["token"] = "hw-12345"
-save_config("config.yaml", config)
 ```
 
 ### `process_config(config_path: str | Path, base_dir: str | Path | None = None, resolve_models: bool = False, download_models: bool = False) -> dict`
@@ -221,29 +203,6 @@ model_path = runtime_config["advanced"]["models"]["yolo11n"]["path"]
 
 # Download missing models
 runtime_config = process_config("config.yaml", resolve_models=True, download_models=True)
-```
-
-### `build_rtsp_url(rtsp_source: dict) -> str`
-
-Build RTSP URL from decomposed components.
-
-**Parameters:**
-- `rtsp_source`: dict with keys: username, password, ip, port, path
-
-**Returns:** str - Full RTSP URL
-
-**Usage:**
-```python
-from transformsai_ai_core import build_rtsp_url
-
-url = build_rtsp_url({
-    "username": "admin",
-    "password": "pass@123",
-    "ip": "192.168.1.100",
-    "port": 554,
-    "path": "/stream"
-})
-# Result: rtsp://admin:pass%40123@192.168.1.100:554/stream
 ```
 
 ---
@@ -281,9 +240,6 @@ cap = VideoCaptureAsync(
 ### `start(loop: bool = None) -> self`
 
 Start background capture thread.
-
-**Parameters:**
-- `loop`: bool|null - For file sources only, loop video
 
 **Returns:** self for chaining
 
@@ -544,6 +500,9 @@ uploader.send_data(
 )
 ```
 
+### `send_data_sync(data: dict|null = None, files: dict|null = None, base_url: str|null = None, method: str = "POST", content_type: str = "auto", endpoint_path: str = "", url_params: dict|null = None) -> dict`
+Same as send_data, but synchronous, blocks until response is received, then the response dict is returned.
+
 ### `send_heartbeat(sn: str, timestamp: str, status_log: str = "", live_url: str = "") -> None`
 
 Send heartbeat (asynchronous, not cached on failure).
@@ -556,10 +515,9 @@ Send heartbeat (asynchronous, not cached on failure).
 
 **Usage:**
 ```python
-import time
+from transformsai_ai_core import time_to_string
 uploader.send_heartbeat(
-    sn="camera_01",
-    timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    timestamp=time_to_string(time.time()),    # time_to_string already returns server expected time format
     status_log="Running normally",
     live_url=streamer.get_hls_url()
 )
