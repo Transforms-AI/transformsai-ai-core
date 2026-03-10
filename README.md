@@ -47,13 +47,14 @@ uploader.shutdown()
 
 **Module:** `transformsai_ai_core.central_logger`
 
-### `get_logger(name: str | object = None, module_name: str = None) -> LoggerWrapper`
+### `get_logger(name: str | object = None, module_name: str = None, cli_debug: bool = False) -> LoggerWrapper`
 
 Get pre-configured logger instance with colored console output and rotating file logs.
 
 **Parameters:**
 - `name`: str|object - Logger name (string or class instance for auto-naming)
 - `module_name`: str - Deprecated, kept for compatibility
+- `cli_debug`: bool - If True, enables DEBUG level for console output (globally affects all loggers). Default is False.
 
 **Returns:** LoggerWrapper with standard log methods
 
@@ -66,6 +67,10 @@ logger = get_logger(__name__)
 logger.info("Message")
 logger.warning("Warning")
 logger.debug("Debug info")
+
+# Enable DEBUG level for console (affects all loggers globally)
+logger = get_logger(__name__, cli_debug=True)
+logger.debug("This will now appear in console")
 
 # Error logging with traceback control
 logger.error("Error occurred")  # Includes traceback in file, not console

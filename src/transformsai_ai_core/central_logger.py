@@ -25,8 +25,11 @@ def patch_record_with_bound_name(record: dict) -> None:
 
 logger.configure(patcher=patch_record_with_bound_name)
 
+# Module-level state for cli_debug
+_CLI_DEBUG = False
+
 # Console handler - INFO and above, traceback controlled by record extra
-logger.add(
+_CONSOLE_HANDLER = logger.add(
     sys.stderr,
     level="INFO",
     format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
@@ -92,17 +95,49 @@ logging.getLogger("watchdog").setLevel(logging.WARNING)
 # Cache for logger wrappers to avoid creating new instances for same name
 _LOGGER_CACHE = {}
 
-def get_logger(name: Union[str, object] = None, module_name: str = None):
+def _set_cli_debug(enabled: bool) -> None:
+    """
+    Update the console handler to show DEBUG level messages.
+    
+    Args:
+        enabled: If True, set console to DEBUG. If False, set to INFO.
+    """
+    global _CLI_DEBUG, _CONSOLE_HANDLER
+    
+    if _CLI_DEBUG == enabled:
+        return
+    
+    _CLI_DEBUG = enabled
+    
+    logger.remove(_CONSOLE_HANDLER)
+    _CONSOLE_HANDLER = logger.add(
+        sys.stderr,
+        level="DEBUG" if enabled else "INFO",
+        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+               "<level>{level: <8}</level> | "
+               "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+               "<level>{message}</level>",
+        colorize=True,
+        backtrace=lambda record: record["extra"].get("show_console_traceback", False),
+        diagnose=lambda record: record["extra"].get("show_console_traceback", False)
+    )
+
+
+def get_logger(name: Union[str, object] = None, module_name: str = None, cli_debug: bool = False):
     """
     Get the pre-configured Loguru logger instance.
 
     Args:
         name: A string or an object (e.g., a class instance) to name the logger.
         module_name: Kept for compatibility, usually `__name__`.
+        cli_debug: If True, enables DEBUG level for console output (globally).
+                   Default is False (INFO level).
 
     Returns:
         A logger wrapper with error() and exception() methods.
     """
+    _set_cli_debug(cli_debug)
+    
     logger_name = name or module_name
     
     if logger_name and not isinstance(logger_name, str):
