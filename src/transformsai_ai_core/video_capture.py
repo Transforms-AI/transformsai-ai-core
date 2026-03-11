@@ -122,58 +122,48 @@ class VideoCaptureAsync:
             self._data_uploader.send_heartbeat(sn, time_to_string(time.time()), status_log=custom_message)
 
     def _initialize_capture(self):
-        """Opens the capture device and applies source-specific hardware optimizations."""
-        if self.cap is not None:
-            self.cap.release()
-            self.cap = None
+            """Opens the capture device and applies optimal settings."""
+            if self.cap is not None:
+                self.cap.release()
+                self.cap = None
+                
+            if self.source_type == 'USB':
+                # Use our optimized V4L2 initialization
+                self.cap = cv2.VideoCapture(self.src, cv2.CAP_V4L2)
+                if not self.cap.isOpened():
+                    raise RuntimeError(f"Could not open USB source: {self.src}")
+                    
+                # Strict Order: FOURCC -> Width/Height -> FPS -> Buffer
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                if self.width and self.height:
+                    self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+                    self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+                if self.target_fps:
+                    self.cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                
+                # Flush stale hardware buffers
+                for _ in range(4):
+                    self.cap.grab()
+                    
+            else:
+                # Fallback for Network/Files
+                backend = cv2.CAP_FFMPEG if self.source_type == 'NETWORK' else cv2.CAP_ANY
+                self.cap = cv2.VideoCapture(self.src, backend)
+                if not self.cap.isOpened():
+                    raise RuntimeError(f"Could not open source: {self.src}")
+                if self.buffer_size is not None:
+                    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, self.buffer_size)
+    
+            # Extract metadata
+            fps = self.cap.get(cv2.CAP_PROP_FPS)
+            self._fps = self.target_fps if self.target_fps else (fps if fps > 0 else 30.0)
             
-        # 1. Select optimal backend
-        backend = cv2.CAP_ANY
-        if self.opencv_backend != "auto":
-            backend_map = {'ffmpeg': cv2.CAP_FFMPEG, 'gstreamer': cv2.CAP_GSTREAMER, 'v4l2': cv2.CAP_V4L2}
-            backend = backend_map.get(self.opencv_backend.lower(), cv2.CAP_ANY)
-        elif self.source_type == 'USB':
-            backend = cv2.CAP_V4L2
-        elif self.source_type == 'NETWORK':
-            backend = cv2.CAP_FFMPEG
-
-        self.cap = cv2.VideoCapture(self.src, backend)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"Could not open video source: {self.src}")
-
-        # 2. Apply Source-Specific Optimizations
-        if self.source_type == 'USB':
-            # Force MJPG compression to save USB bandwidth (crucial for high-res/FPS)
-            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            # Set hardware resolution BEFORE reading to prevent CPU downscaling
-            if self.width and self.height:
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-            
-        if self.source_type in ('USB', 'NETWORK') and self.buffer_size is not None:
-            # Minimize internal buffer to prevent latency/stale frames
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, self.buffer_size)
-
-        if self.hw_decode:
-            try:
-                self.cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
-            except Exception:
-                pass
-
-        # 3. Flush stale hardware buffers for live cameras
-        if self.source_type == 'USB':
-            for _ in range(4):
-                self.cap.grab()
-
-        # 4. Extract metadata
-        fps = self.cap.get(cv2.CAP_PROP_FPS)
-        self._fps = self.target_fps if self.target_fps else fps if fps and fps > 0 else 30.0
-        
-        if self._is_file_source:
-            self._frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-            
-        self.logger.info(f"[{self.src}] Initialized {self.source_type} source (FPS: {self._fps:.2f})")
-
+            if self._is_file_source:
+                self._frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                
+            self.logger.info(f"[{self.src}] Initialized {self.source_type} source (FPS: {self._fps:.2f})")
+    
     def get_height_width(self):
         if self.cap and self.cap.isOpened():
             return int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)), int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
