@@ -738,7 +738,7 @@ class DataUploader:
                     files: Optional[Dict] = None, base_url: Optional[str] = None,
                     method: str = "POST", content_type: str = "auto",
                     endpoint_path: str = "", url_params: Optional[Dict] = None,
-                    dont_cache: bool = False) -> Optional[str]:
+                    dont_cache: bool = True) -> Optional[str]:
         """Sends data synchronously and waits for a response.
 
         This method blocks until the request (including any retries) is complete.
