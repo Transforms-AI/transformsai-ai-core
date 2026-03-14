@@ -1,194 +1,120 @@
-# --- Information About Script ---
-__name__ = "Central Logger (Powered by Loguru)"
-__version__ = "4.0.0"
-__author__ = "TransformsAI"
-
-import logging
 import sys
+import os
+import atexit
+import json
+import inspect
+import traceback
+from datetime import datetime
 from pathlib import Path
-from typing import Union
-
+from multiprocessing import current_process
 from loguru import logger
 
-# --- 1. Centralized Configuration ---
-
-# Create logs directory
-Path("logs").mkdir(exist_ok=True)
-
-# Remove default handler
+# Remove default loguru handler
 logger.remove()
 
-# Patcher to use custom logger names
-def patch_record_with_bound_name(record: dict) -> None:
-    if record["extra"].get("name"):
-        record["name"] = record["extra"]["name"]
+_is_configured = False
+_current_log_path = None
+_start_time_obj = None
 
-logger.configure(patcher=patch_record_with_bound_name)
-
-# Module-level state for cli_debug
-_CLI_DEBUG = False
-
-# Console handler - INFO and above, traceback controlled by record extra
-_CONSOLE_HANDLER = logger.add(
-    sys.stderr,
-    level="INFO",
-    format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
-           "<level>{level: <8}</level> | "
-           "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
-           "<level>{message}</level>",
-    colorize=True,
-    backtrace=lambda record: record["extra"].get("show_console_traceback", False),
-    diagnose=lambda record: record["extra"].get("show_console_traceback", False)
-)
-
-# Debug file handler - all levels with traceback, date-based rotation
-logger.add(
-    "logs/debug_{time:YYYY-MM-DD}.log",
-    level="DEBUG",
-    rotation="10 MB",
-    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
-    backtrace=True,
-    diagnose=True,
-    encoding="utf8"
-)
-
-# Error file handler - ERROR and above with full traceback, date-based rotation
-logger.add(
-    "logs/error_{time:YYYY-MM-DD}.log",
-    level="ERROR",
-    rotation="5 MB",
-    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
-    backtrace=True,
-    diagnose=True,
-    encoding="utf8"
-)
-
-# --- 2. Intercept Standard Logging ---
-class InterceptHandler(logging.Handler):
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            level = logger.level(record.levelname).name
-        except ValueError:
-            level = record.levelno
-
-        frame, depth = logging.currentframe(), 2
-        while frame and frame.f_code.co_filename == logging.__file__:
-            frame = frame.f_back
-            depth += 1
-
-        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
-
-logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
-
-# Set specific log levels for noisy libraries
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("requests").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("gradio").setLevel(logging.INFO)
-logging.getLogger("qdrant_client").setLevel(logging.INFO)
-logging.getLogger("asyncio").setLevel(logging.WARNING)
-logging.getLogger("watchdog").setLevel(logging.WARNING)
-
-# --- 3. The Public API Function ---
-
-# Cache for logger wrappers to avoid creating new instances for same name
-_LOGGER_CACHE = {}
-
-def _set_cli_debug(enabled: bool) -> None:
-    """
-    Update the console handler to show DEBUG level messages.
+def _flat_json_sink(message):
+    """Writes a flattened JSON string to the file sink."""
+    record = message.record
     
-    Args:
-        enabled: If True, set console to DEBUG. If False, set to INFO.
-    """
-    global _CLI_DEBUG, _CONSOLE_HANDLER
+    # Build the flat payload
+    payload = {
+        "timestamp": record["time"].isoformat(),
+        "level": record["level"].name,
+        "message": record["message"],
+        "logger_name": record["extra"].get("logger_name", record["name"]),
+        "file": record["file"].name,
+        "line": record["line"],
+        "function": record["function"],
+        "process_name": record["process"].name,
+        "elapsed_sec": record["elapsed"].total_seconds(),
+    }
     
-    if _CLI_DEBUG == enabled:
-        return
+    # Merge any extra bound variables (like user_id, loss, etc)
+    payload.update(record["extra"])
     
-    _CLI_DEBUG = enabled
-    
-    logger.remove(_CONSOLE_HANDLER)
-    _CONSOLE_HANDLER = logger.add(
-        sys.stderr,
-        level="DEBUG" if enabled else "INFO",
-        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
-               "<level>{level: <8}</level> | "
-               "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
-               "<level>{message}</level>",
-        colorize=True,
-        backtrace=lambda record: record["extra"].get("show_console_traceback", False),
-        diagnose=lambda record: record["extra"].get("show_console_traceback", False)
-    )
+    # Handle Exceptions
+    if record["exception"]:
+        payload["exception"] = "".join(traceback.format_exception(*record["exception"]))
 
+    # Write to the file defined in the sink configuration
+    with open(_current_log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, default=str) + "\n")
 
-def get_logger(name: Union[str, object] = None, module_name: str = None, cli_debug: bool = False):
+def _rename_log_at_exit():
+    global _current_log_path, _start_time_obj
+    if _current_log_path and os.path.exists(_current_log_path):
+        if current_process().name == 'MainProcess':
+            end_time_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            start_time_str = _start_time_obj.strftime("%Y-%m-%d_%H-%M-%S")
+            directory = os.path.dirname(_current_log_path)
+            final_path = os.path.join(directory, f"run_{start_time_str}_to_{end_time_str}.jsonl")
+            try:
+                os.rename(_current_log_path, final_path)
+            except Exception:
+                pass
+
+def get_logger(name: str = None, cli_debug: bool = False, module_name: str = None):
     """
     Get the pre-configured Loguru logger instance.
 
     Args:
         name: A string or an object (e.g., a class instance) to name the logger.
-        module_name: Kept for compatibility, usually `__name__`.
-        cli_debug: If True, enables DEBUG level for console output (globally).
-                   Default is False (INFO level).
+              If an object is passed, its class name will be used.
+        cli_debug: If True, enables DEBUG level for console output. Default is False (INFO level).
+                   Note: This parameter was renamed from 'debug' for backwards compatibility.
+        module_name: DEPRECATED: This parameter will be removed in a future version.
+                     Use 'name' parameter instead. Kept for backwards compatibility.
 
     Returns:
-        A logger wrapper with error() and exception() methods.
+        A logger instance bound with the given name.
     """
-    _set_cli_debug(cli_debug)
-    
-    logger_name = name or module_name
-    
-    if logger_name and not isinstance(logger_name, str):
-        if hasattr(logger_name, '__class__'):
-            logger_name = logger_name.__class__.__name__
-    
-    # Use cache key to avoid creating duplicate wrappers
-    cache_key = logger_name if isinstance(logger_name, str) else None
-    
-    if cache_key and cache_key in _LOGGER_CACHE:
-        return _LOGGER_CACHE[cache_key]
+    global _is_configured, _current_log_path, _start_time_obj
 
-    base_logger = logger.bind(name=logger_name) if isinstance(logger_name, str) else logger
-    
-    class LoggerWrapper:
-        """Lightweight wrapper with __slots__ for memory efficiency."""
-        __slots__ = ('_logger',)
+    # Handle object as name (for backwards compatibility with code passing 'self')
+    if name is not None and not isinstance(name, str):
+        if hasattr(name, '__class__'):
+            name = name.__class__.__name__
+
+    # Handle deprecated module_name parameter
+    if module_name is not None:
+        # module_name is deprecated, prefer 'name' if provided
+        if name is None:
+            name = module_name
+
+    if name is None:
+        frame = inspect.currentframe().f_back
+        name = frame.f_globals.get("__name__", "unknown_module")
+
+    if not _is_configured:
+        console_level = "DEBUG" if cli_debug else "INFO"
+        log_dir = Path(".core-logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        _start_time_obj = datetime.now()
+        start_time_str = _start_time_obj.strftime("%Y-%m-%d_%H-%M-%S")
+        _current_log_path = log_dir / f"run_{start_time_str}_IN_PROGRESS.jsonl"
+
+        # 1. Console Sink
+        logger.add(
+            sys.stderr,
+            level=console_level,
+            format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{extra[logger_name]}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+            colorize=True,
+            enqueue=True
+        )
+
+        # 2. File Sink (Using our flat JSON sink function)
+        logger.add(
+            _flat_json_sink, 
+            level="TRACE", 
+            enqueue=True
+        )
         
-        def __init__(self, base):
-            self._logger = base
-        
-        def error(self, msg, *args, traceback: bool = True, **kwargs):
-            """
-            Log an error message.
-            
-            Args:
-                msg: The message to log.
-                traceback: If True (default), includes full traceback in file but not stdout.
-                           If False, logs message only.
-            """
-            if traceback:
-                # Add traceback to files only (console has backtrace conditional)
-                self._logger.opt(exception=True).error(msg, *args, **kwargs)
-            else:
-                self._logger.error(msg, *args, **kwargs)
-        
-        def exception(self, msg, *args, **kwargs):
-            """
-            Log an exception with full traceback to both file and stdout.
-            Always captures exception context.
-            """
-            # Use bind to mark this as needing console traceback
-            self._logger.bind(show_console_traceback=True).opt(exception=True, depth=1).error(msg, *args, **kwargs)
-        
-        def __getattr__(self, name):
-            return getattr(self._logger, name)
-    
-    wrapper = LoggerWrapper(base_logger)
-    
-    # Cache the wrapper for future use
-    if cache_key:
-        _LOGGER_CACHE[cache_key] = wrapper
-    
-    return wrapper
+        atexit.register(_rename_log_at_exit)
+        _is_configured = True
+
+    return logger.bind(logger_name=name)

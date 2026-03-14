@@ -552,7 +552,6 @@ class DataUploader:
                             if hasattr(file_content, 'seek'):
                                 file_content.seek(0)
 
-                attempt_start = time.time()
                 response = self._make_http_request(url, method, headers, data_payload, files, single_request_timeout)
                 
                 success_codes = [200, 201, 204, 202]
@@ -595,17 +594,17 @@ class DataUploader:
                     messages.append(error_msg)
                     
             except requests.exceptions.Timeout:
-                error_msg = f"Timeout for {identifier} (attempt {attempt + 1}) - {method} {endpoint} after {single_request_timeout}s"
+                error_msg = f"Timeout for {identifier} (attempt {attempt + 1}) - {method} {url} after {single_request_timeout}s"
                 self.logger.error(error_msg)
                 messages.append(error_msg)
                 
             except requests.exceptions.ConnectionError as e:
-                error_msg = f"Connection error for {identifier} (attempt {attempt + 1}) - {method} {endpoint}: {str(e)}"
+                error_msg = f"Connection error for {identifier} (attempt {attempt + 1}) - {method} {url}: {str(e)}"
                 self.logger.error(error_msg)
                 messages.append(error_msg)
                 
             except Exception as e:
-                error_msg = f"Error for {identifier} (attempt {attempt + 1}) - {method} {endpoint}: {str(e)}"
+                error_msg = f"Error for {identifier} (attempt {attempt + 1}) - {method} {url}: {str(e)}\n- data: {data_payload}"
                 self.logger.error(error_msg)
                 messages.append(error_msg)
             
@@ -626,11 +625,11 @@ class DataUploader:
                 method=method,
                 headers=headers
             )
-            msg = f"FAILED: {identifier} after {self.max_retries + 1} attempts. Added to cache."
+            msg = f"FAILED: {identifier} after {self.max_retries + 1} attempts (added to retry-cache). - method: {method} url: {url}\n-data: {data_payload}"
             self.logger.error(msg)
             messages.append(msg)
         else:
-            final_failure_msg = f"FAILED: {identifier} after {self.max_retries + 1} attempts (not cached)"
+            final_failure_msg = f"FAILED: {identifier} after {self.max_retries + 1} attempts (not cached). - method: {method} url: {url}\n-data: {data_payload}"
             self.logger.error(final_failure_msg)
             messages.append(final_failure_msg)
         
@@ -891,7 +890,7 @@ class DataUploader:
                                 
                                 # Validate file content is not empty
                                 if not file_content:
-                                    self.logger.error(f"Cached file is empty: {cache_file_path}")
+                                    self.logger.error(f"Cached file is empty: {cache_file_path} | Item: {item.uuid}")
                                     continue
                                 
                                 # Create BytesIO object for proper file handling
@@ -911,7 +910,7 @@ class DataUploader:
                                 self.logger.debug(f"Loaded cached file: {cache_file_path} ({len(file_content)} bytes)")
                                 
                             except Exception as e:
-                                self.logger.error(f"Failed to load cached file {cache_file_path}: {e}")
+                                self.logger.error(f"Failed to load cached file {cache_file_path} for {item.uuid}: {e}")
                                 continue
                         else:
                             self.logger.warning(f"Cached file not found: {cache_file_path}")
@@ -937,7 +936,7 @@ class DataUploader:
                     self.logger.info(f"✓ Cache retry successful: {item.uuid}")
                 else:
                     if item.retry_count >= self.cache_manager.max_cache_retries:
-                        self.logger.warning(f"Max retries exceeded for {item.uuid}, removing from cache")
+                        self.logger.warning(f"Max retries exceeded for {item.uuid}, removing from cache | URL: {item.url}")
                         self.cache_manager.remove_from_cache(item)
                 
             except Exception as e:

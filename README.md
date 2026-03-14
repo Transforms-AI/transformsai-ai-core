@@ -5,721 +5,17 @@ Internal library for computer vision projects. Provides thread-safe utilities fo
 ## Installation
 
 ```bash
-# Basic installation
-pip install git+https://github.com/yourusername/transformsai-ai-core.git
+# Basic installation with no inference engine support
+uv add "transformsai-ai-core @ git+https://github.com/Transforms-AI/transformsai-ai-core.git"
 
-# With YOLO/YOLOE support (ultralytics + torch)
-pip install "git+https://github.com/yourusername/transformsai-ai-core.git#egg=transformsai-ai-core[all]"
+# With extra rknn inferencing support [Available extras: onnx, rknn, trt]
+uv add "transformsai-ai-core[rknn] @ git+https://github.com/Transforms-AI/transformsai-ai-core.git"
+
 ```
 
-## Quick Start
+## Quick usage pipeline example
 
-```python
-from transformsai_ai_core import (
-    get_logger, VideoCaptureAsync, MediaMTXStreamer, 
-    DataUploader, load_config, process_config
-)
-
-# Load and process config
-config = load_config("config.yaml", validate=True)
-runtime_config = process_config("config.yaml", resolve_models=True)
-
-# Setup components
-logger = get_logger(__name__)
-cap = VideoCaptureAsync("rtsp://camera:554/stream", auto_restart_on_fail=True).start()
-streamer = MediaMTXStreamer("127.0.0.1", 8554, "cam_01", 1280, 720).start_streaming()
-uploader = DataUploader(base_url="https://api.example.com")
-
-# Main loop
-while True:
-    grabbed, frame = cap.read()
-    if grabbed:
-        streamer.update_frame(frame)
-
-cap.release()
-streamer.stop_streaming()
-uploader.shutdown()
-```
-
----
-
-## 1. Central Logger
-
-**Module:** `transformsai_ai_core.central_logger`
-
-### `get_logger(name: str | object = None, module_name: str = None, cli_debug: bool = False) -> LoggerWrapper`
-
-Get pre-configured logger instance with colored console output and rotating file logs.
-
-**Parameters:**
-- `name`: str|object - Logger name (string or class instance for auto-naming)
-- `module_name`: str - Deprecated, kept for compatibility
-- `cli_debug`: bool - If True, enables DEBUG level for console output (globally affects all loggers). Default is False.
-
-**Returns:** LoggerWrapper with standard log methods
-
-**Usage:**
-```python
-from transformsai_ai_core import get_logger
-
-# Basic usage
-logger = get_logger(__name__)
-logger.info("Message")
-logger.warning("Warning")
-logger.debug("Debug info")
-
-# Enable DEBUG level for console (affects all loggers globally)
-logger = get_logger(__name__, cli_debug=True)
-logger.debug("This will now appear in console")
-
-# Error logging with traceback control
-logger.error("Error occurred")  # Includes traceback in file, not console
-logger.error("Error occurred", traceback=False)  # No traceback anywhere
-logger.exception("Critical error")  # Always includes full traceback
-
-# Named logger for classes
-class MyWorker:
-    def __init__(self):
-        self.logger = get_logger(self)  # Auto-names as "MyWorker"
-```
-
-**Log Output:**
-- Console: INFO and above, colored, conditional traceback
-- `logs/debug_YYYY-MM-DD.log`: DEBUG and above, full traceback
-- `logs/error_YYYY-MM-DD.log`: ERROR and above, full traceback
-
----
-
-## 2. Configuration Management
-
-**Module:** `transformsai_ai_core.config_loader`
-
-### Expected Config Structure
-
-Complete `config.yaml` schema:
-
-```yaml
-# Meta Configuration (MetaConfig)
-meta:
-  name: "project-name"              # str, REQUIRED: Project identifier
-  version: "1.0.0"                  # str, default "1.0.0": Config schema version
-  token: ""                         # str, default "":  (header x-token:)
-
-# Cameras (list[CameraConfig])
-cameras:
-  - local: false                    # bool, default false: Use local file vs RTSP
-    local_source: ""                # str, default "": Path to local video file
-    rtsp_source:                    # RtspSource object
-      username: "admin"             # str, default "admin": RTSP username
-      password: ""                  # str, default "": RTSP password
-      ip: ""                        # str, default "": Camera IP address
-      port: 554                     # int, default 554: RTSP port
-      path: "/Streaming/Channels/101"  # str, default: RTSP stream path
-    settings:                         # dict[str, Any]: Freeform per-camera settings
-      resolution:
-        height: 1280
-        width: 720
-      fps: 15
-
-# Advanced Configuration (AdvancedConfig)
-advanced:
-  # Models (dict[str, ModelConfig])
-  models:
-    model_name:                     # Key is model identifier (e.g., "yolo11n", "face-det")
-      download_key: ""              # str, default "": Direct download key from server
-      type: "person-det"            # str, REQUIRED: Model type/category
-      batch: 1                      # int, default 1: Batch size for inference
-      path: ""                      # str, default "": Local path (auto-populated after download)
-      export: false                 # bool, default false: Enable automatic model export
-      load_options:                 # LoadOptions object
-        lib_type: "YOLO"            # str, default "YOLO": Model library (YOLO|YOLOE)
-        task: "detect"              # str, default "detect": Task type (detect|classify|segment)
-      export_options: {}            # dict[str, Any]: Freeform export parameters
-
-  # Timings (dict[str, Any]): Freeform
-  timings:
-    inference_interval: 0.033       # Example: Custom timing values
-    datasend_interval: 120
-    frame_collection_interval: 0.05
-    
-  # Data Sending (DatasendConfig)
-  datasend:
-    enabled: true                   # bool, default true: Master switch
-    base_url: ""                    # str, default "": API base URL
-    endpoints: {}                   # dict[str, str]: Freeform endpoint paths
-    secret_keys: []                 # list[str], default []: API authentication keys
-
-  # Livestream (LivestreamConfig)
-  livestream:
-    enabled: true                   # bool, default true: Master switch
-    mediamtx_ip: "localhost"        # str, default "localhost": MediaMTX server IP
-    rtsp_port: 8554                 # int, default 8554: MediaMTX RTSP port
-    settings:                       # dict[str, Any]: Freeform settings
-      queue_size: 2                 # int, default 2: Async frame queue depth
-
-  # Pipeline (dict[str, Any]): Freeform, determined by project
-  pipeline:
-    tracking_threshold: 0.5         # All project-specific settings
-    camera_cpu_affinity: [0,1]
-```
-
-### `load_config(config_path: str | Path, validate: bool = True) -> dict`
-
-Load and optionally validate config from YAML file.
-
-**Parameters:**
-- `config_path`: str|Path - Path to config.yaml
-- `validate`: bool, default True - Validate against Pydantic schema
-
-**Returns:** dict - Config as dictionary
-
-**Usage:**
-```python
-from transformsai_ai_core import load_config
-
-config = load_config("config.yaml", validate=True)
-project_name = config["meta"]["name"]
-cameras = config["cameras"]
-```
-
-### `process_config(config_path: str | Path, base_dir: str | Path | None = None, resolve_models: bool = False, download_models: bool = False) -> dict`
-
-Load config and process for runtime use (build RTSP URLs, resolve model paths).
-
-**Parameters:**
-- `config_path`: str|Path - Path to config.yaml
-- `base_dir`: str|Path|null, default None - Project root (defaults to config parent)
-- `resolve_models`: bool, default False - Resolve model paths
-- `download_models`: bool, default False - Download missing models
-
-**Returns:** dict - Processed config with RTSP URLs built
-
-**Usage:**
-```python
-from transformsai_ai_core import process_config
-
-# Build RTSP URLs
-runtime_config = process_config("config.yaml")
-rtsp_url = runtime_config["cameras"][0]["rtsp_url"]
-
-# Resolve model paths
-runtime_config = process_config("config.yaml", resolve_models=True)
-model_path = runtime_config["advanced"]["models"]["yolo11n"]["path"]
-
-# Download missing models
-runtime_config = process_config("config.yaml", resolve_models=True, download_models=True)
-```
-
----
-
-## 3. Video Capture
-
-**Module:** `transformsai_ai_core.video_capture`
-
-### `VideoCaptureAsync`
-
-Asynchronous video capture with auto-restart, hardware decode, and edge device optimization.
-
-**Initialization:**
-```python
-from transformsai_ai_core import VideoCaptureAsync
-
-cap = VideoCaptureAsync(
-    src=0,                        # any: Camera index, RTSP URL, or file path
-    width=None,                   # int|null: Target width for resize
-    height=None,                  # int|null: Target height for resize
-    driver=None,                  # any: Deprecated
-    heartbeat_config=None,        # dict|null: Heartbeat settings
-    auto_restart_on_fail=False,   # bool, default False: Auto-restart on failure
-    restart_delay=30.0,           # float, default 30.0s: Delay between restarts
-    buffer_size=1,                # int, default 1: OpenCV buffer (1=minimal lag)
-    opencv_backend="auto",        # str, default "auto": 'auto'|'ffmpeg'|'gstreamer'
-    max_frame_age_ms=100,         # int, default 100ms: Drop old frames
-    auto_resize=True,             # bool, default True: Resize in read() if needed
-    hw_decode=False               # bool, default False: Hardware decode
-)
-```
-
-**Methods:**
-
-### `start(loop: bool = None) -> self`
-
-Start background capture thread.
-
-**Returns:** self for chaining
-
-**Usage:**
-```python
-cap = VideoCaptureAsync("rtsp://camera:554/stream").start()
-cap = VideoCaptureAsync("video.mp4").start(loop=True)
-```
-
-### `read(wait_for_frame: bool = False, timeout: float = 1.0, copy: bool = True) -> tuple[bool, ndarray|null]`
-
-Read latest captured frame.
-
-**Parameters:**
-- `wait_for_frame`: bool, default False - Wait for first frame
-- `timeout`: float, default 1.0s - Timeout when waiting
-- `copy`: bool, default True - Return copy (False = direct reference, faster)
-
-**Returns:** tuple (grabbed: bool, frame: ndarray|null)
-
-**Usage:**
-```python
-# Non-blocking read
-grabbed, frame = cap.read()
-
-# Wait for first frame
-grabbed, frame = cap.read(wait_for_frame=True, timeout=10.0)
-
-# Direct reference (faster, don't modify)
-grabbed, frame = cap.read(copy=False)
-```
-
-### `get(propId: int) -> float|null`
-
-Get OpenCV capture property.
-
-**Parameters:**
-- `propId`: int - cv2.CAP_PROP_* constant
-
-**Returns:** float|null
-
-**Usage:**
-```python
-fps = cap.get(cv2.CAP_PROP_FPS)
-```
-
-### `set(propId: int, value: float) -> bool`
-
-Set OpenCV capture property.
-
-**Parameters:**
-- `propId`: int - cv2.CAP_PROP_* constant
-- `value`: float - Property value
-
-**Returns:** bool - Success
-
-**Usage:**
-```python
-cap.set(cv2.CAP_PROP_BRIGHTNESS, 50)
-```
-
-### `stop() -> None`
-
-Stop background capture thread.
-
-**Usage:**
-```python
-cap.stop()
-```
-
-### `release() -> None`
-
-Release capture device and cleanup resources.
-
-**Usage:**
-```python
-cap.release()
-```
-
-**Context Manager:**
-```python
-with VideoCaptureAsync("rtsp://camera:554/stream") as cap:
-    grabbed, frame = cap.read()
-# Automatically calls release()
-```
-
----
-
-## 4. MediaMTX Streaming
-
-**Module:** `transformsai_ai_core.mediamtx_streamer`
-
-### `MediaMTXStreamer`
-
-Push video frames to MediaMTX RTSP server with hardware encoding support.
-
-**Initialization:**
-```python
-from transformsai_ai_core import MediaMTXStreamer
-
-streamer = MediaMTXStreamer(
-    mediamtx_ip="localhost",      # str: MediaMTX server IP/hostname
-    rtsp_port=8554,               # int: MediaMTX RTSP port
-    camera_sn_id="cam_01",        # str: Camera identifier
-    fps=30,                       # int, default 30: Frame rate
-    frame_width=1920,             # int: Frame width
-    frame_height=1080,            # int: Frame height
-    bitrate="1500k",              # str, default "1500k": Video bitrate
-    debug_log_interval=60.0,      # float, default 60.0s: Debug log interval
-    encoder_preset="ultrafast",   # str, default "ultrafast": Encoder preset
-    encoder_codec="copy",         # str, default "copy": 'copy'|'libx264'
-    stream_queue_size=2,          # int, default 2: Async queue depth
-    hw_encode=False               # bool, default False: Auto-detect hardware encoder
-)
-```
-
-**Methods:**
-
-### `start_streaming() -> bool`
-
-Start FFmpeg streaming process.
-
-**Returns:** bool - Success
-
-**Usage:**
-```python
-if streamer.start_streaming():
-    print(f"Streaming to: {streamer.rtsp_url}")
-```
-
-### `stop_streaming() -> None`
-
-Stop streaming process and cleanup.
-
-**Usage:**
-```python
-streamer.stop_streaming()
-```
-
-### `update_frame(frame: ndarray) -> None`
-
-Update stream with new frame (non-blocking, uses memoryview).
-
-**Parameters:**
-- `frame`: ndarray - OpenCV BGR frame
-
-**Usage:**
-```python
-grabbed, frame = cap.read()
-if grabbed:
-    streamer.update_frame(frame)
-```
-
-### `get_rtsp_url() -> str`
-
-**Returns:** str - RTSP URL
-
-### `get_webrtc_url() -> str`
-
-**Returns:** str - WebRTC URL
-
-### `get_hls_url() -> str`
-
-**Returns:** str - HLS URL
-
-**Usage:**
-```python
-print(f"RTSP: {streamer.get_rtsp_url()}")
-print(f"WebRTC: {streamer.get_webrtc_url()}")
-print(f"HLS: {streamer.get_hls_url()}")
-```
-
----
-
-## 5. Data Upload
-
-**Module:** `transformsai_ai_core.datasend`
-
-### `DataUploader`
-
-Asynchronous HTTP client with caching, retries, and auto-tuned thread pool.
-
-**Initialization:**
-```python
-from transformsai_ai_core import DataUploader
-
-uploader = DataUploader(
-    base_url=None,                        # str|null: API base URL
-    heartbeat_url=None,                   # str|null: Heartbeat endpoint URL
-    headers=None,                         # dict|null: Default headers
-    secret_keys=None,                     # str|list[str]|null: API auth keys
-    secret_key_header="X-Secret-Key",     # str, default: Header name for auth
-    max_workers=None,                     # int|null, default min(2, cpu_count)
-    max_retries=5,                        # int, default 5: Max retry attempts
-    retry_delay=1,                        # int, default 1s: Base retry delay
-    timeout=300,                          # int, default 300s: Total timeout
-    disable_caching=False,                # bool, default False: Disable cache
-    cache_file_path="uploader_cache.json",# str: Cache file path
-    cache_files_dir="uploader_cached_files",# str: Cache files directory
-    max_cache_retries=5,                  # int, default 5: Max cache retry count
-    cache_retry_interval=100,             # int, default 100s: Retry interval
-    max_cache_items=300,                  # int, default 300: Max cached items
-    max_cache_age_seconds=86400,          # int, default 24h: Max item age
-    source="Frame Processor",             # str: Source identifier
-    project_version=None                  # str|null: Project version
-)
-```
-
-**Methods:**
-
-### `send_data(data: dict|null = None, heartbeat: bool = False, files: dict|null = None, base_url: str|null = None, method: str = "POST", content_type: str = "auto", endpoint_path: str = "", url_params: dict|null = None) -> None`
-
-Send data asynchronously (non-blocking).
-
-**Parameters:**
-- `data`: dict|null - Data payload
-- `heartbeat`: bool, default False - Mark as heartbeat (not cached on failure)
-- `files`: dict|null - Files to upload: `{"field": ("name.jpg", bytes, "image/jpeg")}`
-- `base_url`: str|null - Override instance base_url
-- `method`: str, default "POST" - HTTP method: GET|POST|PUT|PATCH|DELETE
-- `content_type`: str, default "auto" - "json"| "form-data"|"auto"
-- `endpoint_path`: str - API endpoint path
-- `url_params`: dict|null - Query parameters
-
-**Usage:**
-```python
-# JSON POST
-uploader.send_data(
-    data={"event": "detection", "count": 5},
-    endpoint_path="/events"
-)
-
-# GET with query params
-uploader.send_data(
-    method="GET",
-    endpoint_path="/status",
-    url_params={"camera": "cam_01"}
-)
-
-# File upload
-from transformsai_ai_core import mat_to_response
-image_tuple = mat_to_response(frame, max_width=1920, jpeg_quality=65)
-uploader.send_data(
-    data={"alert": "unsafe"},
-    files={"image": image_tuple},
-    endpoint_path="/alerts"
-)
-
-# Multiple files
-uploader.send_data(
-    files={
-        "images": [
-            ("frame1.jpg", bytes1, "image/jpeg"),
-            ("frame2.jpg", bytes2, "image/jpeg")
-        ]
-    },
-    endpoint_path="/batch"
-)
-```
-
-### `send_data_sync(data: dict|null = None, files: dict|null = None, base_url: str|null = None, method: str = "POST", content_type: str = "auto", endpoint_path: str = "", url_params: dict|null = None) -> dict`
-Same as send_data, but synchronous, blocks until response is received, then the response dict is returned.
-
-### `send_heartbeat(sn: str, timestamp: str, status_log: str = "", live_url: str = "") -> None`
-
-Send heartbeat (asynchronous, not cached on failure).
-
-**Parameters:**
-- `sn`: str - Serial number / device ID
-- `timestamp`: str - ISO timestamp
-- `status_log`: str, default "" - Status message
-- `live_url`: str, default "" - Live stream URL
-
-**Usage:**
-```python
-from transformsai_ai_core import time_to_string
-uploader.send_heartbeat(
-    timestamp=time_to_string(time.time()),    # time_to_string already returns server expected time format
-    status_log="Running normally",
-    live_url=streamer.get_hls_url()
-)
-```
-
-### `shutdown(wait: bool = True) -> None`
-
-Shutdown uploader and cleanup resources.
-
-**Parameters:**
-- `wait`: bool, default True - Wait for pending uploads
-
-**Usage:**
-```python
-uploader.shutdown()
-```
-
----
-
-## 6. YOLO/YOLOE Wrappers
-
-**Module:** `transformsai_ai_core.yolo_wrapper`
-
-**Requires:** `pip install transformsai-ai-core[ultralytics]`
-
-### `YOLOWrapper`
-
-Ultralytics YOLO wrapper with auto-export and sequential batching.
-
-**Initialization:**
-```python
-from transformsai_ai_core import YOLOWrapper
-
-model = YOLOWrapper(
-    model_dict={
-        "path": "/path/to/model.pt",      # str, required: Model path
-        "export": False,                   # bool, default False: Enable auto-export
-        "batch": 1,                        # int, default 1: Batch size
-        "load_options": {
-            "lib_type": "YOLO",            # str, default "YOLO"
-            "task": "detect"               # str, default "detect"
-        },
-        "export_options": {                # dict: Export parameters
-            "format": "onnx",              # Export format
-            "half": False,                 # FP16
-            "dynamic": True,               # Dynamic batch size
-            "imgsz": 640                   # Image size
-        }
-    }
-)
-```
-
-**Methods:**
-
-### `predict(source: str | Path | list | array, **kwargs) -> list[Results]`
-
-Run prediction with sequential batching.
-
-**Parameters:**
-- `source`: str|Path|list|array - Image path, array, or list of paths
-- `**kwargs`: Additional ultralytics predict parameters
-
-**Returns:** list[Results] - List of detection results
-
-**Usage:**
-```python
-# Single image
-results = model.predict("image.jpg", conf=0.5)
-
-# Multiple images (auto-batched)
-results = model.predict(["img1.jpg", "img2.jpg", "img3.jpg"])
-
-# NumPy array
-results = model.predict(frame_bgr, conf=0.5)
-
-# Access results
-for r in results:
-    boxes = r.boxes.xyxy  # Bounding boxes
-    conf = r.boxes.conf    # Confidence
-    cls = r.boxes.cls      # Class IDs
-```
-
-**Properties:**
-- `original_model_path`: Path - Original model path
-- `exported_model_path`: Path|null - Exported model path (if exported)
-
-### `YOLOEWrapper`
-
-Ultralytics YOLOE wrapper with text/visual prompt support.
-
-**Initialization:**
-```python
-from transformsai_ai_core import YOLOEWrapper
-
-model = YOLOEWrapper(
-    model_dict={
-        "path": "/path/to/yoloe.pt",
-        "export": False,
-        "batch": 1,
-        "load_options": {
-            "lib_type": "YOLOE",
-            "task": "detect"
-        },
-        "export_options": {},
-        "set_classes": None                # list[str]|null: Class names for prompts
-    }
-)
-```
-
-**Methods:**
-
-### `predict(source: str | Path | list | array, **kwargs) -> list[Results]`
-
-Same as YOLOWrapper.predict().
-
-### `set_classes(names: list[str], text_pe: ndarray) -> None`
-
-Set class names for YOLOE text prompts.
-
-**Parameters:**
-- `names`: list[str] - Class names
-- `text_pe`: ndarray - Text positional embeddings
-
-**Usage:**
-```python
-names = ["person", "knife"]
-text_pe = model.get_text_pe(names)
-model.set_classes(names, text_pe)
-results = model.predict("image.jpg")
-```
-
-### `get_text_pe(names: list[str]) -> ndarray`
-
-Get text positional embeddings for class names.
-
-**Parameters:**
-- `names`: list[str] - Class names
-
-**Returns:** ndarray - Text embeddings
-
----
-
-## 7. Utility Functions
-
-**Module:** `transformsai_ai_core.utils`
-
-### `time_to_string(timestamp: float) -> str`
-
-Convert Unix timestamp to ISO format string.
-
-**Parameters:**
-- `timestamp`: float - Unix timestamp
-
-**Returns:** str - ISO format "YYYY-MM-DDTHH:MM:SSZ"
-
-**Usage:**
-```python
-from transformsai_ai_core import time_to_string
-ts = time_to_string(time.time())
-# "2024-01-15T10:30:45Z"
-```
-
-### `mat_to_response(frame: ndarray, max_width: int = 1920, jpeg_quality: int = 65, filename: str = "image.jpg", timestamp: float|null = None, add_timestamp: bool = False) -> tuple|null`
-
-Resize and encode OpenCV frame to JPEG bytes for HTTP upload.
-
-**Parameters:**
-- `frame`: ndarray - OpenCV BGR frame
-- `max_width`: int, default 1920 - Maximum width
-- `jpeg_quality`: int, default 65 - JPEG quality (0-100)
-- `filename`: str, default "image.jpg" - Output filename
-- `timestamp`: float|null, default None - Timestamp to overlay
-- `add_timestamp`: bool, default False - Add timestamp overlay
-
-**Returns:** tuple (filename, bytes, content_type) or None
-
-**Usage:**
-```python
-from transformsai_ai_core import mat_to_response
-
-# Basic encoding
-image_tuple = mat_to_response(frame, max_width=1920, jpeg_quality=65)
-uploader.send_data(files={"image": image_tuple}, endpoint_path="/upload")
-
-# With timestamp
-image_tuple = mat_to_response(
-    frame, 
-    add_timestamp=True, 
-    timestamp=time.time()
-)
-```
-
----
-
-## Recommended Example
-
-Production-ready template for multi-camera AI pipeline with streaming, inference, and data upload:
+Ready template for multi-camera AI pipeline with streaming, inference, and data upload:
 
 ```python
 """
@@ -997,20 +293,617 @@ def main():
 if __name__ == "__main__":
     main()
 ```
+
 ---
 
-## Exported Symbols
+## 1. Central Logger
 
-All of the following are available via `from transformsai_ai_core import *`:
+**Module:** `transformsai_ai_core.central_logger`
 
-**Core:**
-- `get_logger`, `DataUploader`, `MediaMTXStreamer`, `VideoCaptureAsync`
-- `time_to_string`, `mat_to_response`
+### Overview
 
-**Config:**
-- `load_config`, `save_config`, `process_config`, `build_rtsp_url`
-- `AppConfig`, `MetaConfig`, `CameraConfig`, `RtspSource`
-- `ModelConfig`, `DatasendConfig`, `LivestreamConfig`, `AdvancedConfig`
+- Single `get_logger` method for all
+- `.jsonl` json lines formatted structured output file with 6 levels of logs including trace in `.core-logs` directory.
+- `INFO` and above logs to console by default. Set `cli_debug` to True to see DEBUG+ on console.
+- `logger.exception()` automatically captures full tracebacks to both file and console.
+- Install `https://logdy.dev` for log viewing.
 
-**YOLO (optional):**
-- `YOLOWrapper`, `YOLOEWrapper`, `YOLO_AVAILABLE`
+### API
+
+#### `get_logger(name: str | object = None, cli_debug: bool = False) -> LoggerWrapper`
+
+Get a logger instance with the configured handlers.
+
+**Parameters:**
+- `name`: str|object - Logger name (string or class instance for auto-naming). Defaults to caller's module name.
+- `cli_debug`: bool - If True, show DEBUG+ on console for this logger (per-logger override). Default is False.
+
+**Returns:** LoggerWrapper with standard log methods
+
+**Usage:**
+```python
+from transformsai_ai_core import get_logger
+
+# Basic usage - auto-names from caller module
+logger = get_logger()
+logger.info("Basic log message")
+logger.trace("Very detailed info (file only by default)")
+
+# Named logger
+logger = get_logger(name="MyService")
+logger.warning("Something noteworthy")
+
+# Debug mode with auto class naming (per-logger)
+class MyClass:
+    def __init__(self):
+        self.logger = get_logger(self, debug=True)
+logger.debug("This shows on console")
+
+# Exception logging
+try:
+    risky_operation()
+except Exception:
+    logger.exception("Operation failed")  # Full traceback to file and console
+```
+
+## logdy Usage
+
+```bash
+nano run_********.jsonl | logdy
+```
+This will create a web server on port 8080 with the logs.
+
+---
+## 2. Configuration Management
+
+**Module:** `transformsai_ai_core.config_loader`
+
+### Expected Config Structure
+
+Complete `config.yaml` schema:
+
+```yaml
+# Meta Configuration (MetaConfig)
+meta:
+  name: "project-name"              # str, REQUIRED: Project identifier
+  version: "1.0.0"                  # str, default "1.0.0": Config schema version
+  token: ""                         # str, default "":  (header x-token:)
+
+# Cameras (list[CameraConfig])
+cameras:
+  - local: false                    # bool, default false: Use local file vs RTSP
+    local_source: ""                # str, default "": Path to local video file
+    rtsp_source:                    # RtspSource object
+      username: "admin"             # str, default "admin": RTSP username
+      password: ""                  # str, default "": RTSP password
+      ip: ""                        # str, default "": Camera IP address
+      port: 554                     # int, default 554: RTSP port
+      path: "/Streaming/Channels/101"  # str, default: RTSP stream path
+    settings:                         # dict[str, Any]: Freeform per-camera settings
+      resolution:
+        height: 1280
+        width: 720
+      fps: 15
+
+# Advanced Configuration (AdvancedConfig)
+advanced:
+  # Models (dict[str, ModelConfig])
+  models:
+    model_name:                     # Key is model identifier (e.g., "yolo11n", "face-det")
+      download_key: ""              # str, default "": Direct download key from server
+      type: "person-det"            # str, REQUIRED: Model type/category
+      batch: 1                      # int, default 1: Batch size for inference
+      path: ""                      # str, default "": Local path (auto-populated after download)
+      export: false                 # bool, default false: Enable automatic model export
+      load_options:                 # LoadOptions object
+        lib_type: "YOLO"            # str, default "YOLO": Model library (YOLO|YOLOE)
+        task: "detect"              # str, default "detect": Task type (detect|classify|segment)
+      export_options: {}            # dict[str, Any]: Freeform export parameters
+
+  # Timings (dict[str, Any]): Freeform
+  timings:
+    inference_interval: 0.033       # Example: Custom timing values
+    datasend_interval: 120
+    frame_collection_interval: 0.05
+    
+  # Data Sending (DatasendConfig)
+  datasend:
+    enabled: true                   # bool, default true: Master switch
+    base_url: ""                    # str, default "": API base URL
+    endpoints: {}                   # dict[str, str]: Freeform endpoint paths
+    secret_keys: []                 # list[str], default []: API authentication keys
+
+  # Livestream (LivestreamConfig)
+  livestream:
+    enabled: true                   # bool, default true: Master switch
+    mediamtx_ip: "localhost"        # str, default "localhost": MediaMTX server IP
+    rtsp_port: 8554                 # int, default 8554: MediaMTX RTSP port
+    settings:                       # dict[str, Any]: Freeform settings
+      queue_size: 2                 # int, default 2: Async frame queue depth
+
+  # Pipeline (dict[str, Any]): Freeform, determined by project
+  pipeline:
+    tracking_threshold: 0.5         # All project-specific settings
+    camera_cpu_affinity: [0,1]
+```
+
+### `load_config(config_path: str | Path, validate: bool = True) -> dict`
+
+Load and optionally validate config from YAML file.
+
+**Parameters:**
+- `config_path`: str|Path - Path to config.yaml
+- `validate`: bool, default True - Validate against Pydantic schema
+
+**Returns:** dict - Config as dictionary
+
+**Usage:**
+```python
+from transformsai_ai_core import load_config
+
+config = load_config("config.yaml", validate=True)
+project_name = config["meta"]["name"]
+cameras = config["cameras"]
+```
+---
+
+## 3. Video Capture
+
+**Module:** `transformsai_ai_core.video_capture`
+
+### `VideoCaptureAsync`
+
+Asynchronous video capture with auto-restart, hardware decode, and edge device optimization.
+
+**Initialization:**
+```python
+from transformsai_ai_core import VideoCaptureAsync
+
+cap = VideoCaptureAsync(
+    src=0,                        # any: Camera index, RTSP URL, or file path
+    width=None,                   # int|null: Target width for resize
+    height=None,                  # int|null: Target height for resize
+    driver=None,                  # any: Deprecated
+    heartbeat_config=None,        # dict|null: Heartbeat settings
+    auto_restart_on_fail=False,   # bool, default False: Auto-restart on failure
+    restart_delay=30.0,           # float, default 30.0s: Delay between restarts
+    buffer_size=1,                # int, default 1: OpenCV buffer (1=minimal lag)
+    opencv_backend="auto",        # str, default "auto": 'auto'|'ffmpeg'|'gstreamer'
+    max_frame_age_ms=100,         # int, default 100ms: Drop old frames
+    auto_resize=True,             # bool, default True: Resize in read() if needed
+    hw_decode=False               # bool, default False: Hardware decode
+)
+```
+
+**Methods:**
+
+### `start(loop: bool = None) -> self`
+
+Start background capture thread.
+
+**Returns:** self for chaining
+
+**Usage:**
+```python
+cap = VideoCaptureAsync("rtsp://camera:554/stream").start()
+cap = VideoCaptureAsync("video.mp4").start(loop=True)
+```
+
+### `read(wait_for_frame: bool = False, timeout: float = 1.0, copy: bool = True) -> tuple[bool, ndarray|null]`
+
+Read latest captured frame.
+
+**Parameters:**
+- `wait_for_frame`: bool, default False - Wait for first frame
+- `timeout`: float, default 1.0s - Timeout when waiting
+- `copy`: bool, default True - Return copy (False = direct reference, faster)
+
+**Returns:** tuple (grabbed: bool, frame: ndarray|null)
+
+**Usage:**
+```python
+# Non-blocking read
+grabbed, frame = cap.read()
+
+# Wait for first frame
+grabbed, frame = cap.read(wait_for_frame=True, timeout=10.0)
+
+# Direct reference (faster, don't modify)
+grabbed, frame = cap.read(copy=False)
+```
+
+### `stop() -> None`
+
+Stop background capture thread.
+
+**Usage:**
+```python
+cap.stop()
+```
+
+### `release() -> None`
+
+Release capture device and cleanup resources.
+
+**Usage:**
+```python
+cap.release()
+```
+---
+
+## 4. MediaMTX Streaming
+
+**Module:** `transformsai_ai_core.mediamtx_streamer`
+
+### `MediaMTXStreamer`
+
+Push video frames to MediaMTX RTSP server with hardware encoding support.
+
+**Initialization:**
+```python
+from transformsai_ai_core import MediaMTXStreamer
+
+streamer = MediaMTXStreamer(
+    mediamtx_ip="localhost",      # str: MediaMTX server IP/hostname
+    rtsp_port=8554,               # int: MediaMTX RTSP port
+    camera_sn_id="cam_01",        # str: Camera identifier
+    fps=30,                       # int, default 30: Frame rate
+    frame_width=1920,             # int: Frame width
+    frame_height=1080,            # int: Frame height
+    bitrate="1500k",              # str, default "1500k": Video bitrate
+    debug_log_interval=60.0,      # float, default 60.0s: Debug log interval
+    encoder_preset="ultrafast",   # str, default "ultrafast": Encoder preset
+    encoder_codec="copy",         # str, default "copy": 'copy'|'libx264'
+    stream_queue_size=2,          # int, default 2: Async queue depth
+    hw_encode=False               # bool, default False: Auto-detect hardware encoder
+)
+```
+
+**Methods:**
+
+### `start_streaming() -> bool`
+
+Start FFmpeg streaming process.
+
+**Returns:** bool - Success
+
+**Usage:**
+```python
+if streamer.start_streaming():
+    print(f"Streaming to: {streamer.rtsp_url}")
+```
+
+### `stop_streaming() -> None`
+
+Stop streaming process and cleanup.
+
+**Usage:**
+```python
+streamer.stop_streaming()
+```
+
+### `update_frame(frame: ndarray) -> None`
+
+Update stream with new frame (non-blocking, uses memoryview).
+
+**Parameters:**
+- `frame`: ndarray - OpenCV BGR frame
+
+**Usage:**
+```python
+grabbed, frame = cap.read()
+if grabbed:
+    streamer.update_frame(frame)
+```
+
+### `get_rtsp_url() -> str`
+
+**Returns:** str - RTSP URL
+
+### `get_webrtc_url() -> str`
+
+**Returns:** str - WebRTC URL
+
+**Usage:**
+```python
+print(f"RTSP: {streamer.get_rtsp_url()}")
+print(f"WebRTC: {streamer.get_webrtc_url()}")
+```
+
+---
+
+## 5. Data Upload
+
+**Module:** `transformsai_ai_core.datasend`
+
+### `DataUploader`
+
+Asynchronous HTTP client with caching, retries, and auto-tuned thread pool.
+
+**Initialization:**
+```python
+from transformsai_ai_core import DataUploader
+
+uploader = DataUploader(
+    base_url=None,                        # str|null: API base URL
+    heartbeat_url=None,                   # str|null: Heartbeat endpoint URL
+    headers=None,                         # dict|null: Default headers
+    secret_keys=None,                     # str|list[str]|null: API auth keys
+    secret_key_header="X-Secret-Key",     # str, default: Header name for auth
+    max_workers=None,                     # int|null, default min(2, cpu_count)
+    max_retries=5,                        # int, default 5: Max retry attempts
+    retry_delay=1,                        # int, default 1s: Base retry delay
+    timeout=300,                          # int, default 300s: Total timeout
+    disable_caching=False,                # bool, default False: Disable cache
+    cache_file_path="uploader_cache.json",# str: Cache file path
+    cache_files_dir="uploader_cached_files",# str: Cache files directory
+    max_cache_retries=5,                  # int, default 5: Max cache retry count
+    cache_retry_interval=100,             # int, default 100s: Retry interval
+    max_cache_items=300,                  # int, default 300: Max cached items
+    max_cache_age_seconds=86400,          # int, default 24h: Max item age
+    source="Frame Processor",             # str: Source identifier
+    project_version=None                  # str|null: Project version
+)
+```
+
+**Methods:**
+
+### `send_data(data: dict|null = None, heartbeat: bool = False, files: dict|null = None, base_url: str|null = None, method: str = "POST", content_type: str = "auto", endpoint_path: str = "", url_params: dict|null = None) -> None`
+
+Send data asynchronously (non-blocking).
+
+**Parameters:**
+- `data`: dict|null - Data payload
+- `heartbeat`: bool, default False - Mark as heartbeat (not cached on failure)
+- `files`: dict|null - Files to upload: `{"field": ("name.jpg", bytes, "image/jpeg")}`
+- `base_url`: str|null - Override instance base_url
+- `method`: str, default "POST" - HTTP method: GET|POST|PUT|PATCH|DELETE
+- `content_type`: str, default "auto" - "json"| "form-data"|"auto"
+- `endpoint_path`: str - API endpoint path
+- `url_params`: dict|null - Query parameters
+
+**Usage:**
+```python
+# JSON POST
+uploader.send_data(
+    data={"event": "detection", "count": 5},
+    endpoint_path="/events"
+)
+
+# GET with query params
+uploader.send_data(
+    method="GET",
+    endpoint_path="/status",
+    url_params={"camera": "cam_01"}
+)
+
+# File upload
+from transformsai_ai_core import mat_to_response
+image_tuple = mat_to_response(frame, max_width=1920, jpeg_quality=65)
+uploader.send_data(
+    data={"alert": "unsafe"},
+    files={"image": image_tuple},
+    endpoint_path="/alerts"
+)
+
+# Multiple files
+uploader.send_data(
+    files={
+        "images": [
+            ("frame1.jpg", bytes1, "image/jpeg"),
+            ("frame2.jpg", bytes2, "image/jpeg")
+        ]
+    },
+    endpoint_path="/batch"
+)
+```
+
+### `send_data_sync(data: dict|null = None, files: dict|null = None, base_url: str|null = None, method: str = "POST", content_type: str = "auto", endpoint_path: str = "", url_params: dict|null = None) -> dict`
+Same as send_data, but synchronous, blocks until response is received, then the response dict is returned.
+
+### `send_heartbeat(sn: str, timestamp: str, status_log: str = "", live_url: str = "") -> None`
+
+Send heartbeat (asynchronous, not cached on failure).
+
+**Parameters:**
+- `sn`: str - Serial number / device ID
+- `timestamp`: str - ISO timestamp
+- `status_log`: str, default "" - Status message
+- `live_url`: str, default "" - Live stream URL
+
+**Usage:**
+```python
+from transformsai_ai_core import time_to_string
+uploader.send_heartbeat(
+    timestamp=time_to_string(time.time()),    # time_to_string already returns server expected time format
+    status_log="Running normally",
+    live_url=streamer.get_hls_url()
+)
+```
+
+### `shutdown(wait: bool = True) -> None`
+
+Shutdown uploader and cleanup resources.
+
+**Parameters:**
+- `wait`: bool, default True - Wait for pending uploads
+
+**Usage:**
+```python
+uploader.shutdown()
+```
+
+---
+
+## 6. YOLO/YOLOE Wrappers
+
+**Module:** `transformsai_ai_core.yolo_wrapper`
+
+**Requires:** `pip install transformsai-ai-core[ultralytics]`
+
+### `YOLOWrapper`
+
+Ultralytics YOLO wrapper with auto-export and sequential batching.
+
+**Initialization:**
+```python
+from transformsai_ai_core import YOLOWrapper
+
+model = YOLOWrapper(                        # Should directly send the config[models][target] key.
+    model_dict={
+        "path": "/path/to/model.pt",      # str, required: Model path
+        "export": False,                   # bool, default False: Enable auto-export
+        "batch": 1,                        # int, default 1: Batch size
+        "load_options": {
+            "lib_type": "YOLO",            # str, default "YOLO"
+            "task": "detect"               # str, default "detect"
+        },
+        "export_options": {                # dict: Export parameters
+            "format": "onnx",              # Export format
+            "half": False,                 # FP16
+            "dynamic": True,               # Dynamic batch size
+            "imgsz": 640                   # Image size
+        }
+    }
+)
+```
+
+**Methods:**
+
+### `predict(source: str | Path | list | array, **kwargs) -> list[Results]`
+
+Run prediction with sequential batching.
+
+**Parameters:**
+- `source`: str|Path|list|array - Image path, array, or list of paths
+- `**kwargs`: Additional ultralytics predict parameters
+
+**Returns:** list[Results] - List of detection results
+
+**Usage:**
+```python
+# Single image
+results = model.predict("image.jpg", conf=0.5)
+
+# Multiple images (auto-batched)
+results = model.predict(["img1.jpg", "img2.jpg", "img3.jpg"])
+
+# NumPy array
+results = model.predict(frame_bgr, conf=0.5)
+
+# Access results
+for r in results:
+    boxes = r.boxes.xyxy  # Bounding boxes
+    conf = r.boxes.conf    # Confidence
+    cls = r.boxes.cls      # Class IDs
+```
+
+**Properties:**
+- `original_model_path`: Path - Original model path
+- `exported_model_path`: Path|null - Exported model path (if exported)
+
+### `YOLOEWrapper`
+
+Ultralytics YOLOE wrapper with text/visual prompt support.
+
+**Initialization:**
+```python
+from transformsai_ai_core import YOLOEWrapper
+
+model = YOLOEWrapper(
+    model_dict={
+        "path": "/path/to/yoloe.pt",
+        "export": False,
+        "batch": 1,
+        "load_options": {
+            "lib_type": "YOLOE",
+            "task": "detect"
+        },
+        "export_options": {},
+        "set_classes": None                # list[str]|null: Class names for prompts
+    }
+)
+```
+
+**Methods:**
+
+### `predict(source: str | Path | list | array, **kwargs) -> list[Results]`
+
+Same as YOLOWrapper.predict().
+
+### `set_classes(names: list[str], text_pe: ndarray) -> None`
+
+Set class names for YOLOE text prompts.
+
+**Parameters:**
+- `names`: list[str] - Class names
+- `text_pe`: ndarray - Text positional embeddings
+
+**Usage:**
+```python
+names = ["person", "knife"]
+text_pe = model.get_text_pe(names)
+model.set_classes(names, text_pe)
+results = model.predict("image.jpg")
+```
+
+### `get_text_pe(names: list[str]) -> ndarray`
+
+Get text positional embeddings for class names.
+
+**Parameters:**
+- `names`: list[str] - Class names
+
+**Returns:** ndarray - Text embeddings
+
+---
+
+## 7. Utility Functions
+
+**Module:** `transformsai_ai_core.utils`
+
+### `time_to_string(timestamp: float) -> str`
+
+Convert Unix timestamp to ISO format string.
+
+**Parameters:**
+- `timestamp`: float - Unix timestamp
+
+**Returns:** str - ISO format "YYYY-MM-DDTHH:MM:SSZ"
+
+**Usage:**
+```python
+from transformsai_ai_core import time_to_string
+ts = time_to_string(time.time())
+# "2024-01-15T10:30:45Z"
+```
+
+### `mat_to_response(frame: ndarray, max_width: int = 1920, jpeg_quality: int = 65, filename: str = "image.jpg", timestamp: float|null = None, add_timestamp: bool = False) -> tuple|null`
+
+Resize and encode OpenCV frame to JPEG bytes for HTTP upload.
+
+**Parameters:**
+- `frame`: ndarray - OpenCV BGR frame
+- `max_width`: int, default 1920 - Maximum width
+- `jpeg_quality`: int, default 65 - JPEG quality (0-100)
+- `filename`: str, default "image.jpg" - Output filename
+- `timestamp`: float|null, default None - Timestamp to overlay
+- `add_timestamp`: bool, default False - Add timestamp overlay
+
+**Returns:** tuple (filename, bytes, content_type) or None
+
+**Usage:**
+```python
+from transformsai_ai_core import mat_to_response
+
+# Basic encoding
+image_tuple = mat_to_response(frame, max_width=1920, jpeg_quality=65)
+uploader.send_data(files={"image": image_tuple}, endpoint_path="/upload")
+
+# With timestamp
+image_tuple = mat_to_response(
+    frame, 
+    add_timestamp=True, 
+    timestamp=time.time()
+)
+```
