@@ -50,7 +50,8 @@ trt = [
     "onnx",
     "onnxruntime-gpu",
     "onnxslim",
-    "tensorrt-cu12>=10.13.3.9; sys_platform != ''", # Ignore for orin nx
+    "tensorrt-cu12>=10.13.3.9; platform_machine != 'aarch64'", # Ignore for orin nx, use: import sys
+                                                               # sys.path.append('/usr/lib/python3.10/dist-packages/')
     "torch", 
     "torchvision", 
 ]
