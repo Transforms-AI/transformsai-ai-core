@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transformsai-ai-core"
-version = "3.2.0"
+version = "3.2.1"
 description = "TransformsAI Core Library - Utilities for AI vision applications"
 readme = "README.md"
 authors = [
@@ -50,7 +50,7 @@ trt = [
     "onnx",
     "onnxruntime-gpu",
     "onnxslim",
-    "tensorrt-cu12>=10.13.3.9",
+    "tensorrt-cu12>=10.13.3.9; sys_platform != ''", # Ignore for orin nx
     "torch", 
     "torchvision", 
 ]
@@ -88,6 +88,13 @@ conflicts = [
         { extra = "trt" },
         { extra = "onnx" },
     ],
+]
+dependency-metadata = [
+    { name = "tensorrt-cu12", requires-dist =["tensorrt-cu12-bindings", "tensorrt-cu12-libs", "tensorrt"] },
+    { name = "tensorrt-cu12-libs", requires-dist =["nvidia-cuda-runtime-cu12"] },
+    { name = "tensorrt-cu12-bindings", requires-dist =[] },
+    { name = "nvidia-cuda-runtime-cu12", requires-dist =[] },
+    { name = "tensorrt", requires-dist = ["tensorrt-cu12"] }
 ]
 
 [tool.uv.sources]

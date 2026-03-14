@@ -15,12 +15,23 @@ logger.remove()
 _is_configured = False
 _current_log_path = None
 _start_time_obj = None
+_rotation_counter = 0
 
 def _flat_json_sink(message):
-    """Writes a flattened JSON string to the file sink."""
+    global _current_log_path, _rotation_counter
     record = message.record
     
-    # Build the flat payload
+    # 1. Check for rotation (10MB = 10 * 1024 * 1024 bytes)
+    if os.path.exists(_current_log_path) and os.path.getsize(_current_log_path) > 10 * 1024 * 1024:
+        _rotation_counter += 1
+        directory = os.path.dirname(_current_log_path)
+        # Rename the full file to a numbered "part"
+        part_path = os.path.join(directory, _current_log_path.name.replace("IN_PROGRESS", f"PART_{_rotation_counter}"))
+        try:
+            os.rename(_current_log_path, part_path)
+        except Exception:
+            pass # Avoid crashing if file is locked
+
     payload = {
         "timestamp": record["time"].isoformat(),
         "level": record["level"].name,
@@ -33,14 +44,11 @@ def _flat_json_sink(message):
         "elapsed_sec": record["elapsed"].total_seconds(),
     }
     
-    # Merge any extra bound variables (like user_id, loss, etc)
     payload.update(record["extra"])
     
-    # Handle Exceptions
     if record["exception"]:
         payload["exception"] = "".join(traceback.format_exception(*record["exception"]))
 
-    # Write to the file defined in the sink configuration
     with open(_current_log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(payload, default=str) + "\n")
 
