@@ -1,37 +1,41 @@
 import sys
-import os
-import atexit
 import json
 import inspect
+import secrets
 import traceback
 from datetime import datetime
 from pathlib import Path
-from multiprocessing import current_process
 from loguru import logger
 
 # Remove default loguru handler
 logger.remove()
 
 _is_configured = False
-_current_log_path = None
-_start_time_obj = None
-_rotation_counter = 0
+_run_id = None
 
-def _flat_json_sink(message):
-    global _current_log_path, _rotation_counter
-    record = message.record
-    
-    # 1. Check for rotation (10MB = 10 * 1024 * 1024 bytes)
-    if os.path.exists(_current_log_path) and os.path.getsize(_current_log_path) > 10 * 1024 * 1024:
-        _rotation_counter += 1
-        directory = os.path.dirname(_current_log_path)
-        # Rename the full file to a numbered "part"
-        part_path = os.path.join(directory, _current_log_path.name.replace("IN_PROGRESS", f"PART_{_rotation_counter}"))
-        try:
-            os.rename(_current_log_path, part_path)
-        except Exception:
-            pass # Avoid crashing if file is locked
 
+def _generate_run_id() -> str:
+    """Generate a 6-character hex hash for run identification."""
+    return secrets.token_hex(3)
+
+
+def _get_log_directory() -> Path:
+    """Get the date-based log directory path."""
+    now = datetime.now()
+    base_dir = Path(".core-logs")
+    date_dir = base_dir / now.strftime("%Y-%m-%d")
+    date_dir.mkdir(parents=True, exist_ok=True)
+    return date_dir
+
+
+def _generate_log_path(run_id: str, directory: Path) -> Path:
+    """Generate log file path with hash and timestamp."""
+    timestamp = datetime.now().strftime("%H-%M-%S")
+    return directory / f"{run_id}_{timestamp}.jsonl"
+
+
+def _build_payload(record: dict) -> dict:
+    """Build a JSON payload from a loguru record."""
     payload = {
         "timestamp": record["time"].isoformat(),
         "level": record["level"].name,
@@ -48,81 +52,117 @@ def _flat_json_sink(message):
     
     if record["exception"]:
         payload["exception"] = "".join(traceback.format_exception(*record["exception"]))
+    
+    return payload
 
-    with open(_current_log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(payload, default=str) + "\n")
 
-def _rename_log_at_exit():
-    global _current_log_path, _start_time_obj
-    if _current_log_path and os.path.exists(_current_log_path):
-        if current_process().name == 'MainProcess':
-            end_time_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            start_time_str = _start_time_obj.strftime("%Y-%m-%d_%H-%M-%S")
-            directory = os.path.dirname(_current_log_path)
-            final_path = os.path.join(directory, f"run_{start_time_str}_to_{end_time_str}.jsonl")
-            try:
-                os.rename(_current_log_path, final_path)
-            except Exception:
-                pass
+def _create_rotation_sink(run_id: str, max_size: int = 10 * 1024 * 1024):
+    """Create a sink function with rotation logic based on file size."""
+    current_path = None
+    current_size = 0
+    
+    def sink(message):
+        nonlocal current_path, current_size
+        
+        # Initialize path on first call
+        if current_path is None:
+            current_path = _generate_log_path(run_id, _get_log_directory())
+        
+        # Check if rotation is needed
+        if current_size > max_size:
+            # Create new file with fresh timestamp
+            current_path = _generate_log_path(run_id, _get_log_directory())
+            current_size = 0
+        
+        # Build and write log entry
+        payload = _build_payload(message.record)
+        line = json.dumps(payload, default=str) + "\n"
+        
+        with open(current_path, "a", encoding="utf-8") as f:
+            f.write(line)
+            current_size += len(line.encode("utf-8"))
+    
+    return sink
 
-def get_logger(name: str = None, cli_debug: bool = False, module_name: str = None):
+def get_logger(
+    name: str = None,
+    cli_sink_level: str = "INFO",
+    file_sink_level: str = "DEBUG",
+    cli_debug: bool = None,  # DEPRECATED
+    module_name: str = None   # DEPRECATED
+):
     """
-    Get the pre-configured Loguru logger instance.
-
+    Get a bound logger instance.
+    
+    The logger is configured on first call. If called from the entry script
+    (detected by __name__ == "__main__"), the passed level parameters are used.
+    Otherwise, default levels are applied if not yet configured.
+    
     Args:
-        name: A string or an object (e.g., a class instance) to name the logger.
-              If an object is passed, its class name will be used.
-        cli_debug: If True, enables DEBUG level for console output. Default is False (INFO level).
-                   Note: This parameter was renamed from 'debug' for backwards compatibility.
-        module_name: DEPRECATED: This parameter will be removed in a future version.
-                     Use 'name' parameter instead. Kept for backwards compatibility.
-
+        name: Logger name. If None, auto-detected from calling module.
+             Can also pass an object (class instance) to use its class name.
+        cli_sink_level: Log level for console output (default: "INFO").
+                       Only effective if called from entry script or not yet configured.
+        file_sink_level: Log level for file output (default: "DEBUG").
+                        Only effective if called from entry script or not yet configured.
+        cli_debug: DEPRECATED - Use cli_sink_level="DEBUG" instead.
+        module_name: DEPRECATED - Use name parameter instead.
+    
     Returns:
-        A logger instance bound with the given name.
+        A logger instance bound with the given logger_name.
+    
+    Example:
+        # Entry script (main.py) - sets custom levels
+        from transformsai_ai_core.central_logger import get_logger
+        
+        logger = get_logger(cli_sink_level="DEBUG", file_sink_level="TRACE")
+        
+        # Any other module - just gets the configured logger
+        from transformsai_ai_core.central_logger import get_logger
+        
+        logger = get_logger()  # Uses already-configured levels
+        logger = get_logger("MyClass")  # With custom name
     """
-    global _is_configured, _current_log_path, _start_time_obj
-
-    # Handle object as name (for backwards compatibility with code passing 'self')
+    global _is_configured, _run_id
+    
+    # Handle object as name
     if name is not None and not isinstance(name, str):
         if hasattr(name, '__class__'):
             name = name.__class__.__name__
-
-    # Handle deprecated module_name parameter
-    if module_name is not None:
-        # module_name is deprecated, prefer 'name' if provided
-        if name is None:
-            name = module_name
-
+            
+    # Auto-detect name from caller and check if entry script
+    caller_is_main = False
     if name is None:
         frame = inspect.currentframe().f_back
         name = frame.f_globals.get("__name__", "unknown_module")
-
-    if not _is_configured:
-        console_level = "DEBUG" if cli_debug else "INFO"
-        log_dir = Path(".core-logs")
-        log_dir.mkdir(parents=True, exist_ok=True)
-
-        _start_time_obj = datetime.now()
-        start_time_str = _start_time_obj.strftime("%Y-%m-%d_%H-%M-%S")
-        _current_log_path = log_dir / f"run_{start_time_str}_IN_PROGRESS.jsonl"
-
-        # 1. Console Sink
+        caller_is_main = frame.f_globals.get("__name__") == "__main__"
+    
+    # Configure if not yet configured
+    if not _is_configured or caller_is_main:
+        logger.remove()  # Remove default handler
+        
+        # Generate run ID once
+        _run_id = _generate_run_id()
+        
+        # Create rotation-aware sink
+        rotation_sink = _create_rotation_sink(_run_id)
+        
+        # Console Sink
         logger.add(
             sys.stderr,
-            level=console_level,
+            level=cli_sink_level,
             format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{extra[logger_name]}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
             colorize=True,
             enqueue=True
         )
-
-        # 2. File Sink (Using our flat JSON sink function)
+        
+        # File Sink with rotation
         logger.add(
-            _flat_json_sink, 
-            level="TRACE", 
+            rotation_sink,
+            level=file_sink_level,
             enqueue=True
         )
         
-        atexit.register(_rename_log_at_exit)
         _is_configured = True
-
+    
     return logger.bind(logger_name=name)

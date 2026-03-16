@@ -1465,9 +1465,9 @@ name = "rknn-toolkit-lite2"
 version = "2.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" } },
-    { name = "psutil" },
-    { name = "ruamel-yaml" },
+    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'darwin'" },
+    { name = "psutil", marker = "sys_platform != 'darwin'" },
+    { name = "ruamel-yaml", marker = "sys_platform != 'darwin'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ab/db/76b40afe343f8a8c5222300da425e0dace30ce639a94776468b1d157311b/rknn_toolkit_lite2-2.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:821e80c95e6838308c133915660b1a6ae78bb8d079b2cbbd46a02dae61192d33", size = 559386, upload-time = "2025-04-09T09:39:54.414Z" },
@@ -1802,7 +1802,7 @@ wheels = [
 
 [[package]]
 name = "transformsai-ai-core"
-version = "3.2.0"
+version = "3.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "clip" },
@@ -1842,7 +1842,7 @@ trt = [
     { name = "onnx" },
     { name = "onnxruntime-gpu" },
     { name = "onnxslim" },
-    { name = "tensorrt-cu12", marker = "sys_platform != ''" },
+    { name = "tensorrt-cu12", marker = "platform_machine != 'aarch64'" },
     { name = "torch", version = "2.10.0", source = { registry = "https://pypi.org/simple" } },
     { name = "torchvision", version = "0.25.0", source = { registry = "https://pypi.org/simple" } },
 ]
@@ -1869,7 +1869,7 @@ requires-dist = [
     { name = "pyyaml" },
     { name = "requests" },
     { name = "rknn-toolkit-lite2", marker = "sys_platform != 'darwin' and extra == 'rknn'", specifier = ">=2.3.2" },
-    { name = "tensorrt-cu12", marker = "sys_platform != '' and extra == 'trt'", specifier = ">=10.13.3.9" },
+    { name = "tensorrt-cu12", marker = "platform_machine != 'aarch64' and extra == 'trt'", specifier = ">=10.13.3.9" },
     { name = "torch", marker = "extra == 'onnx'" },
     { name = "torch", marker = "extra == 'rknn'", specifier = "<=2.2.1" },
     { name = "torch", marker = "extra == 'trt'" },
