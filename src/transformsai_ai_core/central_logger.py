@@ -31,7 +31,7 @@ def _get_log_directory() -> Path:
 def _generate_log_path(run_id: str, directory: Path) -> Path:
     """Generate log file path with hash and timestamp."""
     timestamp = datetime.now().strftime("%H-%M-%S")
-    return directory / f"{run_id}_{timestamp}.jsonl"
+    return directory / f"{timestamp}_{run_id}.jsonl"
 
 
 def _build_payload(record: dict) -> dict:
