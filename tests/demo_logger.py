@@ -13,10 +13,16 @@ logger = get_logger(cli_sink_level="TRACE", file_sink_level="INFO")
 logger.info("Both")
 logger.debug("only stderr")
 logger.trace("only stderr")
+logger.error("error")
+
+try:
+    raise ValueError("This is a test error")
+except ValueError as e:
+    logger.error("An error occurred")
 
 
-# Test auto rotation log info many times
-max_logs = 100000
-for i in range(max_logs):
-    logger.info(f"Log number {i}")
-    time.sleep(0.0001)
+# # Test auto rotation log info many times
+# max_logs = 100000
+# for i in range(max_logs):
+#     logger.info(f"Log number {i}")
+#     time.sleep(0.0001)

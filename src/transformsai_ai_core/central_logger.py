@@ -84,6 +84,19 @@ def _create_rotation_sink(run_id: str, max_size: int = 10 * 1024 * 1024):
     
     return sink
 
+class _LoggerWrapper:
+    """Wraps a loguru bound logger so that .error() auto-includes traceback."""
+    def __init__(self, bound_logger):
+        self._logger = bound_logger
+
+    def error(self, msg, *args, **kwargs):
+        exc = sys.exc_info()[0] is not None
+        self._logger.opt(exception=exc).error(msg, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._logger, name)
+
+
 def get_logger(
     name: str = None,
     cli_sink_level: str = "INFO",
@@ -153,6 +166,7 @@ def get_logger(
             level=cli_sink_level,
             format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{extra[logger_name]}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
             colorize=True,
+            backtrace=True,
             enqueue=True
         )
         
@@ -165,4 +179,4 @@ def get_logger(
         
         _is_configured = True
     
-    return logger.bind(logger_name=name)
+    return _LoggerWrapper(logger.bind(logger_name=name))
