@@ -201,7 +201,8 @@ class VideoCaptureAsync:
         return self
 
     def _update(self):
-            target_frame_duration = 1.0 / self._fps if self._fps > 0 else 0
+            fps = self._fps if self._fps is not None else 30.0
+            target_frame_duration = 1.0 / fps if fps > 0 else 0
             consecutive_fails = 0
 
             while not self._stop_event.is_set():
