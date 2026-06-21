@@ -333,7 +333,7 @@ def get_formatted_fields() -> dict[str, list[str]]:
         "cameras.rtsp_source": ["username", "password", "ip", "port", "path"],
         "advanced.models": ["download_key", "type", "batch", "path", "load_options"],
         "advanced.models.*.load_options": ["lib_type", "task"],
-        "advanced.datasend": ["enabled", "base_url", "secret_keys"],
+        "advanced.datasend": ["enabled", "base_url", "auth_keys", "auth_header"],
         "advanced.livestream": ["enabled", "mediamtx_ip", "rtsp_port"],
     }
 

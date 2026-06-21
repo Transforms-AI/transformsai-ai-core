@@ -66,7 +66,8 @@ advanced:
     base_url: ""                # REQUIRED if enabled
     endpoints:                  # freeform — e.g. endpoints["data"], endpoints["alerts"]
       data: "/data"
-    secret_keys: []             # default: [] — API auth keys
+    auth_keys: []               # default: [] — API auth keys (rotated per request)
+    auth_header: X-Secret-Key   # default: X-Secret-Key — header used to send the auth key
 
   livestream:
     enabled: true               # default: true
@@ -154,7 +155,7 @@ def main():
         uploader = DataUploader(
             base_url=datasend_cfg["base_url"],
             headers=headers,
-            secret_keys=datasend_cfg.get("secret_keys"),
+            secret_keys=datasend_cfg.get("auth_keys"),
             source=meta["name"],
             project_version=meta.get("version"),
         )
@@ -402,6 +403,78 @@ streamer.stop_streaming()
 
 ## 5. Data Upload
 
+### 5a. `ApiClient` (generic HTTP client — preferred)
+
+`ApiClient` is a generic, pooled HTTP client for **any** send/receive with caching + auto-retry.
+No transformsai-specific formatting and **no special heartbeat path** — a heartbeat is just a
+`post(..., cache=False)`. It is backed by one pooled `requests.Session` (keep-alive); async stays
+thread-pool based.
+
+```python
+from transformsai_ai_core import ApiClient, mat_to_response, process_config
+
+config = process_config("config.yaml")
+ds_cfg = config["advanced"]["datasend"]
+
+client = ApiClient(
+    base_url=ds_cfg["base_url"],          # default: None
+    headers=None,                          # default: None
+    timeout=30,                            # default: 30s — per-attempt
+    success_codes=(200, 201, 202, 204),    # default
+    default_content_type="auto",           # default: "auto" — "json" | "form-data" | "auto"
+    auth_keys=ds_cfg.get("auth_keys"),     # default: None — str | list[str], rotated per request
+    auth_header="X-Secret-Key",            # default: "X-Secret-Key"
+    max_retries=3,                         # default: 3
+    retry_backoff=1.0,                     # default: 1.0s (exponential, capped)
+    retry_backoff_max=30,                  # default: 30s
+    retry_on_status=(408, 429, 500, 502, 503, 504),  # default — 4xx fails fast
+    max_workers=None,                      # default: min(2, cpu_count)
+    cache_enabled=True,                    # default: True
+    cache_dir="api_client_cache",          # default — directory-per-request cache
+    cache_retry_interval=100,              # default: 100s (0 disables periodic retry)
+    max_cache_items=300,                   # default: 300
+    max_cache_age_seconds=86400,           # default: 86400 (24h)
+    max_cache_retries=5,                   # default: 5
+    endpoints=None,                        # default: None — {name: path-string | profile-dict}
+    pool_connections=10,                   # default: 10
+    pool_maxsize=10,                       # default: 10
+)
+
+# Convenience verbs (sync — blocks through retries, returns a Response)
+resp = client.post("data", json={"event": "detection", "count": 5})
+if resp.ok:
+    print(resp.status_code, resp.json())   # Response: status_code/text/.json()/ok/attempts/...
+
+# Any verb works via the generic core
+client.request("REPORT", "events", json={"x": 1})
+
+# Files: {"field": ("name.jpg", bytes, "image/jpeg")} or a list of tuples per field
+image_tuple = mat_to_response(frame)       # -> ("image.jpg", bytes, "image/jpeg")
+client.post("alerts", data={"alert": "unsafe"}, files={"image": image_tuple})
+
+# Async (fire-and-forget) — returns a Future[Response]
+fut = client.post("data", json={"k": "v"}, async_=True)
+
+# Heartbeat = a write that is never cached/retried on failure
+client.post("heartbeat", json={"alive": True}, cache=False)
+
+# Endpoint profiles (dynamic backend): register once, send by name
+client.register_endpoint("sentiment", ds_cfg["endpoints"]["sentiment"])           # bare path string
+client.register_endpoint("heartbeat", {"path": ds_cfg["endpoints"]["heartbeat"], "cache": False})  # rich dict
+client.send("sentiment", json={"score": 0.9})   # precedence: per-call arg > profile > client default
+
+client.shutdown(wait=True)   # or use `with ApiClient(...) as client:`
+```
+
+On failure, a write request is persisted to its own folder under `cache_dir/` (atomic, corruption-tolerant)
+and retried periodically until it succeeds or hits the limits. The auto policy caches failed **writes**
+only — never `GET`/`HEAD`/`OPTIONS`. Pass `cache=True`/`cache=False` to force.
+
+### 5b. `DataUploader` (legacy — still available)
+
+> **Legacy.** `DataUploader` is the transformsai-specific uploader from v3. It remains fully
+> supported for backwards compatibility, but new code should prefer `ApiClient` (§5a).
+
 ```python
 from transformsai_ai_core import DataUploader, mat_to_response, time_to_string, process_config
 import time
@@ -414,7 +487,7 @@ uploader = DataUploader(
     base_url=ds_cfg["base_url"],                                 # default: None
     heartbeat_url=None,                                          # default: None — separate heartbeat endpoint
     headers={"x-token": meta["token"]} if meta.get("token") else None,  # default: None
-    secret_keys=ds_cfg.get("secret_keys"),                       # default: None — str | list[str]
+    secret_keys=ds_cfg.get("auth_keys"),                         # default: None — str | list[str]
     secret_key_header="X-Secret-Key",                            # default: "X-Secret-Key"
     max_workers=None,                                            # default: min(2, cpu_count)
     max_retries=5,                                               # default: 5

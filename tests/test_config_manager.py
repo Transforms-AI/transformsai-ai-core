@@ -77,11 +77,11 @@ print("✓ Model structured fields edited successfully")
 print_test_header(6, "Edit Datasend Structured Fields")
 config1["advanced"]["datasend"]["enabled"] = False
 config1["advanced"]["datasend"]["base_url"] = "https://new-api.example.com"
-config1["advanced"]["datasend"]["secret_keys"].append("new-key-6789")
+config1["advanced"]["datasend"]["auth_keys"].append("new-key-6789")
 validated = AppConfig(**config1)
 assert validated.advanced.datasend.enabled == False
 assert validated.advanced.datasend.base_url == "https://new-api.example.com"
-assert len(validated.advanced.datasend.secret_keys) == 6
+assert len(validated.advanced.datasend.auth_keys) == 6
 print("✓ Datasend structured fields edited successfully")
 
 print_test_header(7, "Edit Livestream Structured Fields")

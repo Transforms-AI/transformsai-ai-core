@@ -16,7 +16,9 @@ except (ImportError, AttributeError):
 __all__ = [
     # Core utilities
     'get_logger',
-    'DataUploader', 
+    'DataUploader',
+    'ApiClient',
+    'Response',
     'MediaMTXStreamer',
     'VideoCaptureAsync',
     'time_to_string',
@@ -51,6 +53,8 @@ _LAZY_IMPORTS = {
     # Core utilities
     'get_logger': ('central_logger', 'get_logger'),
     'DataUploader': ('datasend', 'DataUploader'),
+    'ApiClient': ('api_client', 'ApiClient'),
+    'Response': ('api_client', 'Response'),
     'MediaMTXStreamer': ('mediamtx_streamer', 'MediaMTXStreamer'),
     'VideoCaptureAsync': ('video_capture', 'VideoCaptureAsync'),
     'time_to_string': ('utils', 'time_to_string'),

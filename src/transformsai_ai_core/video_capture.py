@@ -2,12 +2,10 @@ import threading
 import cv2
 import time
 import os
-from .datasend import DataUploader 
-from .utils import time_to_string 
 from .central_logger import get_logger
 
 # --- Information About Script ---
-__name__ = "VideoCaptureAsync with Heartbeat"
+__name__ = "VideoCaptureAsync"
 __author__ = "TransformsAI"
 
 class VideoCaptureAsync:
@@ -25,8 +23,7 @@ class VideoCaptureAsync:
         width=None, 
         height=None, 
         driver=None,
-        heartbeat_config=None, 
-        auto_restart_on_fail=False, 
+        auto_restart_on_fail=False,
         restart_delay=30.0,
         buffer_size=1,
         opencv_backend="auto",
@@ -73,19 +70,12 @@ class VideoCaptureAsync:
         self._frame_count = 0
         self._stop_event = threading.Event()
 
-        self._heartbeat_config = heartbeat_config or {}
-        self._data_uploader = None
         self.logger = get_logger(self)
-
-        if self._heartbeat_config.get('enabled', False):
-            self._initialize_heartbeat()
 
         try:
             self._initialize_capture()
-            self._send_heartbeat(f"Video source {self.src} initialized successfully.")
         except RuntimeError as e:
             if not self.auto_restart_on_fail:
-                self._send_heartbeat(f"Video source {self.src} initialization failed.")
                 raise
             else:
                 self.logger.warning(f"[{self.src}] Initial capture failed: {e}. Will retry in thread.")
@@ -107,19 +97,6 @@ class VideoCaptureAsync:
             if ext.lower() in self.VIDEO_EXTENSIONS:
                 return 'FILE'
         return 'UNKNOWN'
-
-    def _initialize_heartbeat(self):
-        try:
-            self._data_uploader = DataUploader(**self._heartbeat_config.get('uploader_config', {}))
-            self.logger.info(f"[{self.src}] Heartbeat initialized.")
-        except Exception as e:
-            self.logger.error(f"[{self.src}] Heartbeat init failed: {e}")
-            self._data_uploader = None
-
-    def _send_heartbeat(self, custom_message=None):
-        if self._data_uploader and self._heartbeat_config.get('enabled', False):
-            sn = self._heartbeat_config.get('sn', f"capture_{self.src}")
-            self._data_uploader.send_heartbeat(sn, time_to_string(time.time()), status_log=custom_message)
 
     def _initialize_capture(self):
             """Opens the capture device and applies optimal settings."""
@@ -184,7 +161,6 @@ class VideoCaptureAsync:
         try:
             self._initialize_capture()
             if self.cap and self.cap.isOpened():
-                self._send_heartbeat(f"Video capture for {self.src} recovered.")
                 self._last_frame_time = 0
                 self._grabbed = False
                 return True
@@ -339,12 +315,7 @@ class VideoCaptureAsync:
         if self.cap:
             self.cap.release()
             self.cap = None
-            
-        if self._data_uploader:
-            try:
-                self._data_uploader.shutdown(wait=False)
-            except Exception:
-                pass
+
         self.started = False
 
     def __enter__(self):

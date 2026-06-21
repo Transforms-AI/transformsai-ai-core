@@ -80,8 +80,9 @@ class DatasendConfig(BaseModel):
 
     enabled: bool = Field(default=True, description="Master switch for data sending")
     base_url: str = Field(default="", description="API base URL")
-    endpoints: dict[str, str] = Field(default_factory=dict, description="Freeform endpoint paths")
-    secret_keys: list[str] = Field(default_factory=list, description="API authentication keys")
+    endpoints: dict[str, Any] = Field(default_factory=dict, description="Freeform endpoint profiles (string path or rich dict)")
+    auth_keys: list[str] = Field(default_factory=list, description="API authentication keys (rotated per request)")
+    auth_header: str = Field(default="X-Secret-Key", description="Header name used to send the auth key")
     settings: dict[str, Any] = Field(default_factory=dict, description="Freeform settings (jpeg_quality, etc.)")
 
 

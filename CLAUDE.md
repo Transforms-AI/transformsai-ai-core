@@ -56,7 +56,15 @@ All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses
 - Key params: `auto_restart_on_fail`, `restart_delay`, `max_frame_age_ms`, `hw_decode`
 - Usage: `.start()` → `.read()` in loop → `.stop()`
 
-**`datasend.py`** — `DataUploader` async HTTP client.
+**`api_client.py`** — `ApiClient` generic, pooled HTTP client (the v4 client; prefer for new code).
+- `Response`/`EndpointProfile`/`ApiClient`; backed by one pooled `requests.Session` (keep-alive, `max_retries=0` so urllib3 doesn't double-retry)
+- No transformsai-specific formatting and no special heartbeat path — a heartbeat is just `post(..., cache=False)`
+- Generic `request(method, path, *, json/data/params/files/..., async_=False)` + `get/post/put/patch/delete`; any verb works
+- `register_endpoint(name, profile)` (string or dict) + `send(name, ...)`; precedence per-call arg > profile > client default
+- Returns a frozen `Response` (`status_code/text/.json()/ok/attempts/...`); total failure → `Response(status_code=0, ok=False)`, never raises
+- Directory-per-request cache (`cache_dir/`, one folder per pending request — atomic, corruption-tolerant, O(1)); auto-retry policy: caches failed writes only, never GET/HEAD/OPTIONS
+
+**`datasend.py`** — `DataUploader` async HTTP client (**legacy**, still available; `ApiClient` supersedes it).
 - Non-blocking by default; thread pool auto-tuned to `min(2, cpu_count)`
 - Failed uploads are cached and retried with exponential backoff (up to `max_cache_items=300`, TTL 24h)
 - `send_data()` is async (fire-and-forget); `send_data_sync()` blocks for response
@@ -115,7 +123,8 @@ advanced:
     enabled: true
     base_url: https://api.example.com
     endpoints: {}  # freeform
-    secret_keys: []
+    auth_keys: []
+    auth_header: X-Secret-Key
   livestream:
     enabled: true
     mediamtx_ip: localhost

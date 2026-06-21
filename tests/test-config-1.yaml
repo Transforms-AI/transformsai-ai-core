@@ -92,7 +92,7 @@ advanced:
     endpoints:
       sentiment: "cameras/create-sentiment-analysis/"
       heartbeat: "cameras/create-camera-heartbeat/"
-    secret_keys:
+    auth_keys:
       - "y4ETFj0CCY2V1SX"
       - "1Rw9JhMLF0RI8G5"
       - "7OD3YR2P1vGiWd5"
