@@ -3,7 +3,7 @@ TransformsAI Core Library
 A collection of utilities for AI vision applications.
 """
 
-__version__ = "1.0.0"
+__version__ = "3.2.5"
 __author__ = "TransformsAI"
 
 # Check YOLO availability early (cheap check, no imports)

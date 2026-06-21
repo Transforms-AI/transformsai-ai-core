@@ -30,7 +30,7 @@ class VideoCaptureAsync:
         restart_delay=30.0,
         buffer_size=1,
         opencv_backend="auto",
-        max_frame_age_ms=100,
+        max_frame_age_ms=None,
         auto_resize=True,
         hw_decode=False,
         fps=None
@@ -93,7 +93,7 @@ class VideoCaptureAsync:
     @property
     def frame_id(self):
         """Returns the ID of the latest grabbed frame to prevent duplicate processing."""
-        with self._read_lock:
+        with self._new_frame_condition:
             return self._frame_id
 
     def _detect_source_type(self, src) -> str:
@@ -126,13 +126,13 @@ class VideoCaptureAsync:
             if self.cap is not None:
                 self.cap.release()
                 self.cap = None
-                
+
             if self.source_type == 'USB':
                 # Use our optimized V4L2 initialization
                 self.cap = cv2.VideoCapture(self.src, cv2.CAP_V4L2)
                 if not self.cap.isOpened():
                     raise RuntimeError(f"Could not open USB source: {self.src}")
-                    
+
                 # Strict Order: FOURCC -> Width/Height -> FPS -> Buffer
                 self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
                 if self.width and self.height:
@@ -141,11 +141,11 @@ class VideoCaptureAsync:
                 if self.target_fps:
                     self.cap.set(cv2.CAP_PROP_FPS, self.target_fps)
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                
+
                 # Flush stale hardware buffers
                 for _ in range(4):
                     self.cap.grab()
-                    
+
             else:
                 # Fallback for Network/Files
                 backend = cv2.CAP_FFMPEG if self.source_type == 'NETWORK' else cv2.CAP_ANY
@@ -154,6 +154,10 @@ class VideoCaptureAsync:
                     raise RuntimeError(f"Could not open source: {self.src}")
                 if self.buffer_size is not None:
                     self.cap.set(cv2.CAP_PROP_BUFFERSIZE, self.buffer_size)
+
+            # Enable hardware-accelerated decoding if requested
+            if self.hw_decode:
+                self.cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
     
             # Extract metadata
             fps = self.cap.get(cv2.CAP_PROP_FPS)
@@ -306,6 +310,13 @@ class VideoCaptureAsync:
                 
                 frame = self._frame.copy() if (self._grabbed and self._frame is not None and copy) else self._frame
                 grabbed = self._grabbed
+
+                # Drop stale frames if max_frame_age_ms is configured
+                if grabbed and self.max_frame_age_ms is not None and self.max_frame_age_ms > 0:
+                    frame_age_ms = (time.time() - self._frame_timestamp) * 1000
+                    if frame_age_ms > self.max_frame_age_ms:
+                        grabbed = False
+                        frame = None
             
             # Software resize fallback (only triggers if hardware resize wasn't possible)
             if grabbed and frame is not None and self.auto_resize and self.width and self.height:

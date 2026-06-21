@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`transformsai-ai-core` is an internal Python library (src layout, `uv` managed) providing thread-safe utilities for computer vision pipelines: video capture, YOLO inference, structured logging, data upload, RTSP streaming, and YAML config management.
+`transformsai-ai-core` is an internal Python library (src layout, build backend `setuptools.build_meta`, `uv` for dependency management/running, Python pinned `>=3.10,<3.12`) providing thread-safe utilities for computer vision pipelines: video capture, YOLO inference, structured logging, data upload, RTSP streaming, and YAML config management. Build backend is `setuptools.build_meta`; Python is pinned `>=3.10,<3.12`.
 
 ## Common Commands
 
@@ -19,13 +19,14 @@ uv sync --extra onnx   # ONNX Runtime GPU
 
 # Run tests
 uv run python tests/test_config_manager.py
-uv run python tests/test_logger.py
-uv run python tests/test_datasend.py
+uv run python -m unittest tests.test_logger
+uv run python -m unittest tests.test_fps_crash
+uv run --with pytest pytest tests/test_datasend.py
 
 # Run a single unittest test
 uv run python -m unittest tests.test_logger.TestCentralLogger.test_basic_logging
 
-# CLI entry point
+# CLI entry point (download models is currently the only subcommand)
 uv run transformsaicore download models --config config.yaml
 ```
 
@@ -37,8 +38,9 @@ All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses
 
 **`central_logger.py`** — Loguru-based structured logger.
 - Output: JSON Lines at `.core-logs/{YYYY-MM-DD}/{HH-MM-SS}_{run_id}.jsonl`
-- API: `get_logger(name, cli_debug=False)` — returns a `LoggerWrapper`
-- `cli_debug=True` enables DEBUG-level console output for that logger
+- API: `get_logger(name=None, cli_sink_level="INFO", file_sink_level="DEBUG")` — returns a `_LoggerWrapper`
+- Console level is set via `cli_sink_level`, configured on first call (levels honored when called from the entry script or before first configuration)
+- `cli_debug` and `module_name` params still exist but are **DEPRECATED**
 - `.error()` automatically captures current exception traceback
 - Auto-rotation at 10 MB; run ID is 6 chars, auto-generated per process
 
@@ -66,14 +68,14 @@ All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses
 
 **`yolo_wrapper.py`** — `YOLOWrapper` / `YOLOEWrapper` around Ultralytics.
 - Auto-exports to ONNX/TensorRT/RKNN when `export=True` in model dict
-- TensorRT export is skipped on `aarch64` (must use native build)
+- TensorRT is excluded on `aarch64` at the **dependency level** (`pyproject.toml`: `tensorrt-cu12 ...; platform_machine != 'aarch64'`), not by branch logic in `yolo_wrapper.py`
 - `YOLOEWrapper` supports text and visual prompts
 
-**`utils.py`** — `time_to_string()`, `mat_to_response()` (JPEG encode + optional timestamp overlay)
+**`utils.py`** — `time_to_string()`, `mat_to_response()` (JPEG encode + optional timestamp overlay), plus visualization helpers: `resize_frame()`, `draw_boxes()`, `draw_common_elements()`, `hide_camera_timestamp_and_add_current_time()`, `get_legend_layout()`
 
 ## Testing
 
-Tests use `unittest` with functional test scripts (not pytest). Test fixtures are in `tests/` (`test-config-1.yaml`, `test-config-2.yaml`, `test.png`). Tests clean up after themselves (reset loggers, remove `.core-logs/`).
+Tests are a **mix** of `unittest` ([test_logger.py](tests/test_logger.py), [test_fps_crash.py](tests/test_fps_crash.py), functional [test_config_manager.py](tests/test_config_manager.py)) and `pytest` ([test_datasend.py](tests/test_datasend.py)). Additional test files: [test_yolo_wrapper.py](tests/test_yolo_wrapper.py), [test_cli_debug.py](tests/test_cli_debug.py). Test fixtures are in `tests/` (`test-config-1.yaml`, `test-config-2.yaml`, `test.png`). Tests clean up after themselves (reset loggers, remove `.core-logs/`). Note: pytest is **not** a declared dependency, so run with `uv run --with pytest pytest tests/test_datasend.py`.
 
 ## Configuration YAML Structure
 

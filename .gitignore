@@ -18,3 +18,6 @@ logs
 
 .core-*
 plans
+
+.kilo
+.ruff_cache
