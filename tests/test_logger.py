@@ -16,6 +16,8 @@ class TestCentralLogger(unittest.TestCase):
     def setUp(self):
         cv_logger._is_configured = False
         cv_logger._run_id = None
+        cv_logger._cli_sink_level = "INFO"
+        cv_logger._file_sink_level = "DEBUG"
         logger.remove()
 
     def tearDown(self):
@@ -140,8 +142,8 @@ class TestCentralLogger(unittest.TestCase):
         self.assertNotIn("This is a debug", console_output)
         
         logs = self._read_jsonl_logs()
-        self.assertEqual(len(logs), 3)
-        self.assertEqual(logs[0]['level'], "TRACE")
+        self.assertEqual(len(logs), 2)
+        self.assertEqual(logs[0]['level'], "DEBUG")
 
     def test_cli_sink_level_debug(self):
         """Test that DEBUG is shown at console with DEBUG level."""

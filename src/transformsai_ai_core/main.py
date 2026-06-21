@@ -8,8 +8,9 @@ from pathlib import Path
 def download_models_command(args):
     """Handle 'download models' command."""
     from transformsai_ai_core.config_loader import process_config
-    from transformsai_ai_core.central_logger import get_logger
+    from transformsai_ai_core.central_logger import configure_logging, get_logger
 
+    configure_logging()
     logger = get_logger()
     config_path = Path(args.config)
 

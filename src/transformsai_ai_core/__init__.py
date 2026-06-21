@@ -16,6 +16,7 @@ except (ImportError, AttributeError):
 __all__ = [
     # Core utilities
     'get_logger',
+    'configure_logging',
     'DataUploader',
     'ApiClient',
     'Response',
@@ -52,6 +53,7 @@ __all__ = [
 _LAZY_IMPORTS = {
     # Core utilities
     'get_logger': ('central_logger', 'get_logger'),
+    'configure_logging': ('central_logger', 'configure_logging'),
     'DataUploader': ('datasend', 'DataUploader'),
     'ApiClient': ('api_client', 'ApiClient'),
     'Response': ('api_client', 'Response'),

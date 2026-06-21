@@ -90,6 +90,7 @@ import time
 import threading
 from collections import deque
 from transformsai_ai_core import (
+    configure_logging,
     get_logger,
     process_config,
     VideoCaptureAsync,
@@ -100,6 +101,7 @@ from transformsai_ai_core import (
     time_to_string,
 )
 
+configure_logging()
 logger = get_logger(__name__)
 
 def camera_io_worker(stream_cfg: dict):
@@ -275,15 +277,17 @@ if __name__ == "__main__":
 ## 1. Logger
 
 ```python
-from transformsai_ai_core import get_logger
+from transformsai_ai_core import configure_logging, get_logger
 
 # Outputs: .core-logs/*.jsonl (all levels), console (INFO+ by default)
 # View logs: cat run_*.jsonl | logdy  (https://logdy.dev)
 
-logger = get_logger(
-    name=__name__,   # default: caller module name — pass self for auto class naming
-    cli_debug=False, # default: False — True shows DEBUG+ on console for this logger
-)
+# Entry script — set sink levels once (last call wins)
+configure_logging(cli_sink_level="DEBUG", file_sink_level="TRACE")
+
+# Library modules — just get a logger, no level arguments
+logger = get_logger()  # auto-detects caller module name
+logger = get_logger("MyClass")  # or pass a name / object for class-name auto-detection
 
 logger.trace("file only")
 logger.debug("file only by default")
