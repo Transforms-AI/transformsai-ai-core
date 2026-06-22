@@ -231,6 +231,11 @@ class YOLOWrapper(_YOLOExportMixin, YOLO):
         """Run prediction with sequential batching (delegates to mixin)."""
         return _YOLOExportMixin.predict(self, source, YOLO.predict, **kwargs)
 
+    @classmethod
+    def from_config(cls, cfg, **overrides):
+        model_dict = cfg.model_dump() if hasattr(cfg, "model_dump") else dict(cfg)
+        return cls(model_dict=model_dict, **overrides)
+
 
 class YOLOEWrapper(_YOLOExportMixin, YOLOE): 
     """
@@ -345,3 +350,8 @@ class YOLOEWrapper(_YOLOExportMixin, YOLOE):
     ) -> List[Any]:
         """Run prediction with sequential batching (delegates to mixin)."""
         return _YOLOExportMixin.predict(self, source, YOLOE.predict, **kwargs)
+
+    @classmethod
+    def from_config(cls, cfg, **overrides):
+        model_dict = cfg.model_dump() if hasattr(cfg, "model_dump") else dict(cfg)
+        return cls(model_dict=model_dict, **overrides)

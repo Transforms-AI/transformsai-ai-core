@@ -46,10 +46,12 @@ All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses
 
 **`config_schema.py` + `config_loader.py`** — Pydantic-validated YAML config system.
 - Root schema: `AppConfig` → `MetaConfig`, `CameraConfig[]`, `AdvancedConfig`
-- `AdvancedConfig` contains `ModelConfig`, `DatasendConfig`, `LivestreamConfig` plus arbitrary freeform dicts
+- `AdvancedConfig` contains `ModelConfig`, `ApiConfig` (unified, replaces legacy `DatasendConfig`), `LivestreamConfig` plus arbitrary freeform dicts
 - Key distinction: *formatted* (strict Pydantic) vs *freeform* (dict[str, Any]) sections — don't add Pydantic validation to intentionally freeform fields
+- Every strict (formatted) section has an `extras: dict[str, Any]` field — a sanctioned freeform channel so the loader never drops data we haven't modeled yet
 - Main entry point: `process_config(path, base_dir, resolve_models, download_models)`
 - `build_rtsp_url(rtsp_source)` constructs authenticated RTSP URLs
+- `init_kwargs(cls, data)` filters a dict to names accepted by `cls.__init__`, used by `from_config` to drop control/freeform keys (`enabled`, `settings`, `extras` leftovers)
 
 **`video_capture.py`** — `VideoCaptureAsync` background-thread capture.
 - Auto-detects source (USB index, RTSP URL, local file)
@@ -92,19 +94,33 @@ meta:
   name: "project-name"   # required
   version: "1.0.0"
   token: ""
+  extras: {}           # sanctioned freeform channel
 
 cameras:
   - local: false
+    local_source: ""
     rtsp_source:
       username: admin
       password: ""
       ip: 192.168.1.100
       port: 554
       path: /Streaming/Channels/101
-    capture:
+      extras: {}
+    capture:            # mirrors VideoCaptureAsync.__init__
       buffer_size: 1
       opencv_backend: auto
-    settings: {}  # freeform
+      max_frame_age_ms: null
+      width: null
+      height: null
+      driver: null
+      auto_restart_on_fail: false
+      restart_delay: 30.0
+      auto_resize: true
+      hw_decode: false
+      fps: null
+      extras: {}
+    settings: {}        # freeform per-camera
+    extras: {}
 
 advanced:
   models:
@@ -117,22 +133,72 @@ advanced:
       load_options:
         lib_type: YOLO
         task: detect       # detect|classify|segment
+        extras: {}
       export_options: {}
+      extras: {}
   timings: {}      # freeform
-  datasend:
+  api:              # Unified ApiClient config (replaces legacy datasend)
     enabled: true
-    base_url: https://api.example.com
-    endpoints: {}  # freeform
+    base_url: ""
+    headers: {}
+    timeout: 30
+    success_codes: [200, 201, 202, 204]
+    default_content_type: auto
     auth_keys: []
     auth_header: X-Secret-Key
-  livestream:
+    max_retries: 3
+    retry_backoff: 1.0
+    retry_backoff_max: 30
+    retry_on_status: [408, 429, 500, 502, 503, 504]
+    max_workers: null
+    cache_enabled: true
+    cache_dir: .core-api-cache
+    cache_retry_interval: 100
+    max_cache_items: 300
+    max_cache_age_seconds: 86400
+    max_cache_retries: 5
+    endpoints: {}  # freeform — auto-registered by from_config
+    pool_connections: 10
+    pool_maxsize: 10
+    settings: {}   # freeform
+    extras: {}
+  livestream:       # mirrors MediaMTXStreamer.__init__
     enabled: true
     mediamtx_ip: localhost
     rtsp_port: 8554
+    camera_sn_id: ""     # config default, overridable per camera
+    fps: 30
+    frame_width: 1920
+    frame_height: 1080
+    bitrate: "1500k"
+    hw_encode: false
+    debug_log_interval: 60.0
     encoder:
       preset: ultrafast
       codec: copy
       queue_size: 2
-    settings: {}   # freeform
+      extras: {}
+    settings: {}   # freeform (NOT consumed by from_config)
+    extras: {}
   pipeline: {}     # freeform project-specific
+```
+
+## Config-Driven Construction (from_config)
+
+Every runtime class now has a `from_config(cls, cfg, **overrides)` classmethod that
+constructs the object directly from a config section. Precedence: **overrides > typed
+fields > `extras`**.
+
+```python
+# ApiClient — near 1:1 mapping, endpoints auto-registered
+client = ApiClient.from_config(cfg["advanced"]["api"], base_url="https://override.example.com")
+
+# VideoCaptureAsync — derives src from camera config
+cap = VideoCaptureAsync.from_config(cfg["cameras"][0])
+
+# MediaMTXStreamer — flattens encoder nesting
+streamer = MediaMTXStreamer.from_config(cfg["advanced"]["livestream"], camera_sn_id="cam1")
+
+# YOLOWrapper / YOLOEWrapper — thin pass-through
+model = YOLOWrapper.from_config(cfg["advanced"]["models"]["yolo11n"])
 ```

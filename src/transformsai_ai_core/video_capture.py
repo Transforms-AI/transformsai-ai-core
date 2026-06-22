@@ -324,3 +324,23 @@ class VideoCaptureAsync:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.release()
+
+    @classmethod
+    def from_config(cls, cfg, **overrides):
+        from .config_loader import build_rtsp_url, init_kwargs
+        if hasattr(cfg, "model_dump"):
+            cfg = cfg.model_dump()
+        else:
+            cfg = dict(cfg)
+
+        if cfg.get("local", False):
+            src = cfg.get("local_source", "")
+        else:
+            src = cfg.get("rtsp_url")
+            if not src:
+                src = build_rtsp_url(cfg.get("rtsp_source", {}))
+
+        capture_cfg = cfg.get("capture", {})
+        kwargs: dict = {"src": src, **capture_cfg}
+        kwargs = {**cfg.get("extras", {}), **kwargs, **overrides}
+        return cls(**init_kwargs(cls, kwargs))

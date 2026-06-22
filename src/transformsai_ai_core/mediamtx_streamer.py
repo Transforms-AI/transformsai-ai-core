@@ -592,20 +592,20 @@ class MediaMTXStreamer:
         avg_write_time = 0
         avg_resize_time = 0
         avg_ping_time = 0
-        
+
         if self.frame_write_times:
             avg_write_time = sum(self.frame_write_times) / len(self.frame_write_times)
-        
+
         if self.frame_resize_times:
             avg_resize_time = sum(self.frame_resize_times) / len(self.frame_resize_times)
-        
+
         if self.network_ping_times:
             recent_pings = [p for p in self.network_ping_times if p < 999.0]
             if recent_pings:
                 avg_ping_time = sum(recent_pings) / len(recent_pings)
-        
+
         system_metrics = self._get_system_metrics()
-        
+
         return {
             'is_streaming': self.is_streaming,
             'restart_count': self.restart_count,
@@ -622,3 +622,29 @@ class MediaMTXStreamer:
             'buffer_issues': self.buffer_full_count,
             'system_metrics': system_metrics
         }
+
+    @classmethod
+    def from_config(cls, cfg, **overrides):
+        from .config_loader import init_kwargs
+        if hasattr(cfg, "model_dump"):
+            cfg = cfg.model_dump()
+        else:
+            cfg = dict(cfg)
+
+        encoder = cfg.get("encoder", {})
+        kwargs: dict = {
+            "mediamtx_ip": cfg.get("mediamtx_ip", "localhost"),
+            "rtsp_port": cfg.get("rtsp_port", 8554),
+            "camera_sn_id": cfg.get("camera_sn_id", ""),
+            "fps": cfg.get("fps", 30),
+            "frame_width": cfg.get("frame_width", 1920),
+            "frame_height": cfg.get("frame_height", 1080),
+            "bitrate": cfg.get("bitrate", "1500k"),
+            "hw_encode": cfg.get("hw_encode", False),
+            "debug_log_interval": cfg.get("debug_log_interval", 60.0),
+            "encoder_preset": encoder.get("preset", "ultrafast"),
+            "encoder_codec": encoder.get("codec", "copy"),
+            "stream_queue_size": encoder.get("queue_size", 2),
+        }
+        kwargs = {**cfg.get("extras", {}), **kwargs, **overrides}
+        return cls(**init_kwargs(cls, kwargs))

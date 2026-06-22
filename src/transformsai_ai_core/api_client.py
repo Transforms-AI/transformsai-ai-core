@@ -720,6 +720,25 @@ class ApiClient:
                 self.logger.warning(f"Max retries exceeded for {fid}, dropping")
                 self.cache.remove(fid)
 
+    # ------------------------------------------------------------------ from_config
+    @classmethod
+    def from_config(cls, cfg, **overrides):
+        from .config_loader import init_kwargs
+        if hasattr(cfg, "model_dump"):
+            cfg = cfg.model_dump()
+        else:
+            cfg = dict(cfg)
+        endpoints = cfg.pop("endpoints", {}) or {}
+        kwargs: dict[str, Any] = {
+            k: v for k, v in cfg.items()
+            if k != "enabled"
+        }
+        kwargs = {**cfg.get("extras", {}), **kwargs, **overrides}
+        client = cls(**init_kwargs(cls, kwargs))
+        for name, profile in endpoints.items():
+            client.register_endpoint(name, profile)
+        return client
+
     # ------------------------------------------------------------------ lifecycle
     def shutdown(self, wait: bool = True) -> None:
         self.logger.info("Shutting down ApiClient")

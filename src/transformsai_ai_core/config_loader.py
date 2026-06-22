@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 import yaml
 
-from .config_schema import AppConfig, CameraConfig
+from .config_schema import AppConfig, ApiConfig, CameraConfig, CaptureSettings, LivestreamConfig
 
 # ==============================================================================
 # Model Download Configuration
@@ -315,6 +315,30 @@ def process_config(
 
 
 # ==============================================================================
+# init_kwargs Helper
+# ==============================================================================
+def init_kwargs(cls, data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Filter a data dict to only the names accepted by cls.__init__.
+
+    This safely drops control/freeform keys (enabled, settings, extras
+    leftovers) so they never reach the constructor while remaining in the
+    validated config dict — nothing is lost there.
+
+    Args:
+        cls: The target class
+        data: Candidate kwargs dict
+
+    Returns:
+        Dict filtered to __init__ parameter names
+    """
+    import inspect
+    sig = inspect.signature(cls.__init__)
+    valid_params = set(sig.parameters.keys())
+    return {k: v for k, v in data.items() if k in valid_params}
+
+
+# ==============================================================================
 # Schema Helpers for Admin UI
 # ==============================================================================
 def get_formatted_fields() -> dict[str, list[str]]:
@@ -329,12 +353,23 @@ def get_formatted_fields() -> dict[str, list[str]]:
     """
     return {
         "meta": ["name", "version", "token"],
-        "cameras": ["local", "local_source", "rtsp_source"],
+        "cameras": ["local", "local_source", "rtsp_source", "capture"],
         "cameras.rtsp_source": ["username", "password", "ip", "port", "path"],
+        "cameras.capture": ["buffer_size", "opencv_backend", "max_frame_age_ms",
+                            "width", "height", "driver", "auto_restart_on_fail",
+                            "restart_delay", "auto_resize", "hw_decode", "fps"],
         "advanced.models": ["download_key", "type", "batch", "path", "load_options"],
         "advanced.models.*.load_options": ["lib_type", "task"],
-        "advanced.datasend": ["enabled", "base_url", "auth_keys", "auth_header"],
-        "advanced.livestream": ["enabled", "mediamtx_ip", "rtsp_port"],
+        "advanced.api": ["enabled", "base_url", "headers", "timeout", "success_codes",
+                         "default_content_type", "auth_keys", "auth_header",
+                         "max_retries", "retry_backoff", "retry_backoff_max",
+                         "retry_on_status", "max_workers", "cache_enabled", "cache_dir",
+                         "cache_retry_interval", "max_cache_items", "max_cache_age_seconds",
+                         "max_cache_retries", "pool_connections", "pool_maxsize"],
+        "advanced.livestream": ["enabled", "mediamtx_ip", "rtsp_port", "camera_sn_id",
+                                "fps", "frame_width", "frame_height", "bitrate",
+                                "hw_encode", "debug_log_interval", "encoder"],
+        "advanced.livestream.encoder": ["preset", "codec", "queue_size"],
     }
 
 
@@ -351,8 +386,8 @@ def get_freeform_fields() -> list[str]:
         "cameras.*.settings",
         "advanced.models.*.export_options",
         "advanced.timings",
-        "advanced.datasend.endpoints",
-        "advanced.datasend.settings",
+        "advanced.api.endpoints",
+        "advanced.api.settings",
         "advanced.livestream.settings",
         "advanced.pipeline",
     ]

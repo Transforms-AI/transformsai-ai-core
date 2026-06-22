@@ -74,15 +74,15 @@ assert validated.advanced.models["person-det"].export_options["backend"] == "onn
 assert validated.advanced.models["gender-cls"].load_options.task == "classify"
 print("✓ Model structured fields edited successfully")
 
-print_test_header(6, "Edit Datasend Structured Fields")
-config1["advanced"]["datasend"]["enabled"] = False
-config1["advanced"]["datasend"]["base_url"] = "https://new-api.example.com"
-config1["advanced"]["datasend"]["auth_keys"].append("new-key-6789")
+print_test_header(6, "Edit Api Structured Fields")
+config1["advanced"]["api"]["enabled"] = False
+config1["advanced"]["api"]["base_url"] = "https://new-api.example.com"
+config1["advanced"]["api"]["auth_keys"].append("new-key-6789")
 validated = AppConfig(**config1)
-assert validated.advanced.datasend.enabled == False
-assert validated.advanced.datasend.base_url == "https://new-api.example.com"
-assert len(validated.advanced.datasend.auth_keys) == 6
-print("✓ Datasend structured fields edited successfully")
+assert validated.advanced.api.enabled == False
+assert validated.advanced.api.base_url == "https://new-api.example.com"
+assert len(validated.advanced.api.auth_keys) == 6
+print("✓ Api structured fields edited successfully")
 
 print_test_header(7, "Edit Livestream Structured Fields")
 config2["advanced"]["livestream"]["enabled"] = False
@@ -129,15 +129,15 @@ assert validated.advanced.timings["inference_interval"] == 0.05
 assert validated.advanced.timings["custom_timing"]["max"] == 100
 print("✓ Timings freeform fields edited successfully")
 
-print_test_header(11, "Edit Datasend Endpoints and Settings (Freeform)")
-config1["advanced"]["datasend"]["endpoints"]["new_endpoint"] = "api/new/"
-config1["advanced"]["datasend"]["settings"]["timeout"] = 30
-config1["advanced"]["datasend"]["settings"]["retry"] = {"max": 3, "delay": 5}
+print_test_header(11, "Edit Api Endpoints and Settings (Freeform)")
+config1["advanced"]["api"]["endpoints"]["new_endpoint"] = "api/new/"
+config1["advanced"]["api"]["settings"]["timeout"] = 30
+config1["advanced"]["api"]["settings"]["retry"] = {"max": 3, "delay": 5}
 validated = AppConfig(**config1)
-assert validated.advanced.datasend.endpoints["new_endpoint"] == "api/new/"
-assert validated.advanced.datasend.settings["timeout"] == 30
-assert validated.advanced.datasend.settings["retry"]["max"] == 3
-print("✓ Datasend freeform fields edited successfully")
+assert validated.advanced.api.endpoints["new_endpoint"] == "api/new/"
+assert validated.advanced.api.settings["timeout"] == 30
+assert validated.advanced.api.settings["retry"]["max"] == 3
+print("✓ Api freeform fields edited successfully")
 
 print_test_header(12, "Edit Livestream Settings (Freeform)")
 config2["advanced"]["livestream"]["settings"]["new_option"] = "enabled"
@@ -293,7 +293,7 @@ print("ALL TESTS PASSED ✓")
 print("="*70)
 print("\nConfig Management System Validated:")
 print("  ✓ Load and validate configs")
-print("  ✓ Edit structured fields (meta, cameras, models, datasend, livestream)")
+print("  ✓ Edit structured fields (meta, cameras, models, api, livestream)")
 print("  ✓ Edit freeform fields (settings, timings, pipeline, export_options)")
 print("  ✓ Validation error handling")
 print("  ✓ RTSP URL building")

@@ -33,8 +33,12 @@ __all__ = [
     'MetaConfig',
     'CameraConfig',
     'RtspSource',
+    'CaptureSettings',
     'ModelConfig',
+    'LoadOptions',
     'DatasendConfig',
+    'ApiConfig',
+    'StreamEncoderSettings',
     'LivestreamConfig',
     'AdvancedConfig',
     # Config loader
@@ -46,6 +50,7 @@ __all__ = [
     'download_model',
     'get_formatted_fields',
     'get_freeform_fields',
+    'init_kwargs',
     # YOLO wrappers (optional)
     'YOLOWrapper',
     'YOLOEWrapper',
@@ -70,8 +75,12 @@ _LAZY_IMPORTS = {
     'MetaConfig': ('config_schema', 'MetaConfig'),
     'CameraConfig': ('config_schema', 'CameraConfig'),
     'RtspSource': ('config_schema', 'RtspSource'),
+    'CaptureSettings': ('config_schema', 'CaptureSettings'),
     'ModelConfig': ('config_schema', 'ModelConfig'),
+    'LoadOptions': ('config_schema', 'LoadOptions'),
     'DatasendConfig': ('config_schema', 'DatasendConfig'),
+    'ApiConfig': ('config_schema', 'ApiConfig'),
+    'StreamEncoderSettings': ('config_schema', 'StreamEncoderSettings'),
     'LivestreamConfig': ('config_schema', 'LivestreamConfig'),
     'AdvancedConfig': ('config_schema', 'AdvancedConfig'),
     # Config loader
@@ -83,6 +92,7 @@ _LAZY_IMPORTS = {
     'download_model': ('config_loader', 'download_model'),
     'get_formatted_fields': ('config_loader', 'get_formatted_fields'),
     'get_freeform_fields': ('config_loader', 'get_freeform_fields'),
+    'init_kwargs': ('config_loader', 'init_kwargs'),
     # YOLO wrappers
     'YOLOWrapper': ('yolo_wrapper', 'YOLOWrapper'),
     'YOLOEWrapper': ('yolo_wrapper', 'YOLOEWrapper'),

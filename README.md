@@ -29,13 +29,22 @@ cameras:
       ip: ""                    # REQUIRED if not local
       port: 554                 # default: 554
       path: "/Streaming/Channels/101"  # default: "/Streaming/Channels/101"
+    capture:                    # mirrors VideoCaptureAsync ctor — all typed, validated
+      buffer_size: 1            # default: 1
+      opencv_backend: auto      # default: "auto" — 'auto'|'ffmpeg'|'gstreamer'|None
+      max_frame_age_ms: null    # default: null — drop frames older than this (ms)
+      width: null               # default: null
+      height: null              # default: null
+      driver: null              # default: null
+      auto_restart_on_fail: false   # default: false
+      restart_delay: 30.0          # default: 30.0s
+      auto_resize: true            # default: true
+      hw_decode: false            # default: false
+      fps: null                   # default: null
     settings:                   # freeform — accessed as config["cameras"][n]["settings"]
       resolution:
         width: 1920
         height: 1080
-      fps: 15
-      buffer_size: 1
-      hw_decode: false
 
 advanced:
   models:
@@ -61,25 +70,76 @@ advanced:
     frame_collect_interval: 3.0
     frame_buffer_size: 1
 
-  datasend:
+  api:                          # Unified API client config (replaces legacy datasend)
     enabled: true               # default: true
     base_url: ""                # REQUIRED if enabled
-    endpoints:                  # freeform — e.g. endpoints["data"], endpoints["alerts"]
-      data: "/data"
+    headers: {}                 # default: {}
+    timeout: 30                 # default: 30s
+    success_codes: [200, 201, 202, 204]  # default
+    default_content_type: auto  # default: "auto"
     auth_keys: []               # default: [] — API auth keys (rotated per request)
-    auth_header: X-Secret-Key   # default: X-Secret-Key — header used to send the auth key
+    auth_header: X-Secret-Key   # default: X-Secret-Key
+    max_retries: 3              # default: 3
+    retry_backoff: 1.0          # default: 1.0s
+    retry_backoff_max: 30       # default: 30s
+    retry_on_status: [408, 429, 500, 502, 503, 504]  # default
+    max_workers: null           # default: null (auto)
+    cache_enabled: true         # default: true
+    cache_dir: .core-api-cache  # default
+    cache_retry_interval: 100   # default: 100s
+    max_cache_items: 300        # default: 300
+    max_cache_age_seconds: 86400   # default: 86400 (24h)
+    max_cache_retries: 5        # default: 5
+    endpoints: {}               # freeform — endpoint profiles (auto-registered by from_config)
+    pool_connections: 10        # default: 10
+    pool_maxsize: 10            # default: 10
+    settings:                   # freeform (jpeg_quality, etc.)
+      jpeg_quality: 60
 
   livestream:
     enabled: true               # default: true
     mediamtx_ip: "localhost"    # default: "localhost"
     rtsp_port: 8554             # default: 8554
+    camera_sn_id: ""            # default: "" — config default, overridable per camera
     fps: 30                     # default: 30
-    settings:                   # freeform
-      queue_size: 2
+    frame_width: 1920           # default: 1920
+    frame_height: 1080          # default: 1080
+    bitrate: "1500k"            # default: "1500k"
+    hw_encode: false            # default: false
+    debug_log_interval: 60.0    # default: 60.0s
+    encoder:
+      preset: ultrafast         # default: "ultrafast"
+      codec: copy               # default: "copy" — "copy"|"libx264"
+      queue_size: 2             # default: 2
+    settings:                   # freeform (NOT consumed by from_config)
 
   pipeline:                     # freeform — all project-specific settings go here
     confidence_threshold: 0.5
 ```
+
+### Config-Driven Construction (`from_config`)
+
+Every runtime class can be built directly from its config section via a `from_config` classmethod.
+Precedence: **overrides > typed fields > `extras`**.
+
+```python
+cfg = process_config("config.yaml")
+
+# ApiClient — near 1:1 mapping, auto-registers endpoints, drops `enabled` / `settings`
+client = ApiClient.from_config(cfg["advanced"]["api"])
+
+# VideoCaptureAsync — derives src from local/rtsp_source/rtsp_url
+cap = VideoCaptureAsync.from_config(cfg["cameras"][0])
+
+# MediaMTXStreamer — flattens encoder.{preset,codec,queue_size}, overridable camera_sn_id
+streamer = MediaMTXStreamer.from_config(cfg["advanced"]["livestream"], camera_sn_id="cam1")
+
+# YOLOWrapper / YOLOEWrapper — thin pass-through
+model = YOLOWrapper.from_config(cfg["advanced"]["models"]["model_name"])
+```
+
+Every strict section also has an `extras: dict[str, Any]` field — a sanctioned freeform channel
+so unmodeled keys survive validation and reach `from_config`.
 
 ---
 
@@ -95,6 +155,7 @@ from transformsai_ai_core import (
     process_config,
     VideoCaptureAsync,
     MediaMTXStreamer,
+    ApiClient,
     DataUploader,
     YOLOWrapper,
     mat_to_response,
@@ -140,7 +201,7 @@ def main():
     cameras        = config["cameras"]
     models_cfg     = config["advanced"]["models"]
     timings        = config["advanced"]["timings"]
-    datasend_cfg   = config["advanced"]["datasend"]
+    datasend_cfg   = config["advanced"]["api"]  # unified API config
     livestream_cfg = config["advanced"]["livestream"]
     pipeline_cfg   = config["advanced"]["pipeline"]
 
@@ -150,7 +211,7 @@ def main():
         if m.get("path"):
             models[name] = YOLOWrapper(m)
 
-    # Uploader
+    # Uploader (legacy)
     uploader = None
     if datasend_cfg.get("enabled"):
         headers  = {"x-token": meta["token"]} if meta.get("token") else None
@@ -162,30 +223,21 @@ def main():
             project_version=meta.get("version"),
         )
 
+    # ApiClient (v4 client, built from config — endpoints auto-registered)
+    client = ApiClient.from_config(datasend_cfg) if datasend_cfg.get("enabled") else None
+
     # Cameras
     stream_configs = []
     for idx, cam_cfg in enumerate(cameras):
         cam_id  = f"cam_{idx}"
-        res     = cam_cfg["settings"]["resolution"]
-        capture = VideoCaptureAsync(
-            src=cam_cfg["rtsp_url"],
-            width=res.get("width", 1920),
-            height=res.get("height", 1080),
-            buffer_size=cam_cfg["settings"].get("buffer_size", 1),
-            hw_decode=cam_cfg["settings"].get("hw_decode", False),
-            fps=cam_cfg["settings"].get("fps", 30),
-        ).start()
+
+        # VideoCaptureAsync built from config
+        capture = VideoCaptureAsync.from_config(cam_cfg).start()
 
         streamer = None
         if livestream_cfg.get("enabled"):
-            streamer = MediaMTXStreamer(
-                mediamtx_ip=livestream_cfg["mediamtx_ip"],
-                rtsp_port=livestream_cfg["rtsp_port"],
-                camera_sn_id=cam_id,
-                fps=livestream_cfg.get("fps", 30),
-                frame_width=res.get("width", 1920),
-                frame_height=res.get("height", 1080),
-            ).start_streaming()
+            streamer = MediaMTXStreamer.from_config(livestream_cfg, camera_sn_id=cam_id)
+            streamer.start_streaming()
 
         buf_size = timings.get("frame_buffer_size", 1)
         interval = timings.get("frame_collect_interval", 3.0)
@@ -340,19 +392,22 @@ from transformsai_ai_core import VideoCaptureAsync, process_config
 
 config  = process_config("config.yaml")
 cam_cfg = config["cameras"][0]
-res     = cam_cfg["settings"]["resolution"]
 
+# Config-driven (recommended):
+cap = VideoCaptureAsync.from_config(cam_cfg).start()
+
+# Or manual construction (all params now typed in config schema):
 cap = VideoCaptureAsync(
     src=cam_cfg["rtsp_url"],                                    # REQUIRED — RTSP URL (built by process_config), file path, or device index
-    width=res.get("width", 1920),                               # default: None — resize width
-    height=res.get("height", 1080),                             # default: None — resize height
-    buffer_size=cam_cfg["settings"].get("buffer_size", 1),      # default: 1 — OpenCV buffer (1 = minimal lag)
-    hw_decode=cam_cfg["settings"].get("hw_decode", False),      # default: False — hardware decode
-    fps=cam_cfg["settings"].get("fps", 30),                     # default: None
+    width=1920,                                                 # default: None
+    height=1080,                                                # default: None
+    buffer_size=1,                                              # default: 1 — OpenCV buffer (1 = minimal lag)
+    hw_decode=False,                                            # default: False — hardware decode
+    fps=30,                                                     # default: None
     auto_restart_on_fail=False,                                 # default: False — restart thread on failure
     restart_delay=30.0,                                         # default: 30.0s
     opencv_backend="auto",                                      # default: "auto" — "auto" | "ffmpeg" | "gstreamer"
-    max_frame_age_ms=100,                                       # default: 100ms — drop frames older than this
+    max_frame_age_ms=100,                                       # default: None — drop frames older than this (ms)
     auto_resize=True,                                           # default: True — resize in read() if w/h set
 ).start(
     loop=False  # default: None — True loops video files
@@ -376,23 +431,27 @@ cap.release()
 from transformsai_ai_core import MediaMTXStreamer, process_config
 
 config  = process_config("config.yaml")
-ls_cfg  = config["advanced"]["livestream"]
-cam_cfg = config["cameras"][0]
-res     = cam_cfg["settings"]["resolution"]
 
+# Config-driven (recommended):
+streamer = MediaMTXStreamer.from_config(
+    config["advanced"]["livestream"],
+    camera_sn_id="cam_01",     # per-camera override — beats config default
+)
+
+# Or manual construction:
 streamer = MediaMTXStreamer(
-    mediamtx_ip=ls_cfg["mediamtx_ip"],                          # REQUIRED
-    rtsp_port=ls_cfg["rtsp_port"],                              # REQUIRED
-    camera_sn_id="cam_01",                                      # REQUIRED — unique camera identifier
-    fps=ls_cfg.get("fps", 30),                                  # default: 30
-    frame_width=res.get("width", 1920),                         # REQUIRED
-    frame_height=res.get("height", 1080),                       # REQUIRED
-    bitrate="1500k",                                            # default: "1500k"
-    encoder_preset="ultrafast",                                 # default: "ultrafast"
-    encoder_codec="copy",                                       # default: "copy" — "copy" | "libx264"
-    stream_queue_size=ls_cfg["settings"].get("queue_size", 2),  # default: 2
-    hw_encode=False,                                            # default: False — auto-detect HW encoder
-    debug_log_interval=60.0,                                    # default: 60.0s
+    mediamtx_ip="localhost",      # default: "localhost"
+    rtsp_port=8554,               # default: 8554
+    camera_sn_id="cam_01",        # REQUIRED — unique camera identifier
+    fps=30,                       # default: 30
+    frame_width=1920,             # default: 1920
+    frame_height=1080,            # default: 1080
+    bitrate="1500k",              # default: "1500k"
+    encoder_preset="ultrafast",   # default: "ultrafast"
+    encoder_codec="copy",         # default: "copy" — "copy" | "libx264"
+    stream_queue_size=2,          # default: 2
+    hw_encode=False,              # default: False — auto-detect HW encoder
+    debug_log_interval=60.0,      # default: 60.0s
 )
 
 streamer.start_streaming()
@@ -418,15 +477,21 @@ thread-pool based.
 from transformsai_ai_core import ApiClient, mat_to_response, process_config
 
 config = process_config("config.yaml")
-ds_cfg = config["advanced"]["datasend"]
 
+# Config-driven (recommended — endpoints auto-registered):
+client = ApiClient.from_config(config["advanced"]["api"])
+
+# Endpoints from config are automatically registered; use them by name:
+client.send("sentiment", json={"score": 0.9})
+
+# Or manual construction:
 client = ApiClient(
-    base_url=ds_cfg["base_url"],          # default: None
+    base_url="https://api.example.com",   # default: None
     headers=None,                          # default: None
     timeout=30,                            # default: 30s — per-attempt
     success_codes=(200, 201, 202, 204),    # default
     default_content_type="auto",           # default: "auto" — "json" | "form-data" | "auto"
-    auth_keys=ds_cfg.get("auth_keys"),     # default: None — str | list[str], rotated per request
+    auth_keys=["key1", "key2"],            # default: None — str | list[str], rotated per request
     auth_header="X-Secret-Key",            # default: "X-Secret-Key"
     max_retries=3,                         # default: 3
     retry_backoff=1.0,                     # default: 1.0s (exponential, capped)
@@ -563,7 +628,8 @@ config    = process_config("config.yaml", resolve_models=True)
 model_cfg = config["advanced"]["models"]["model_name"]  # pass the whole model dict directly
 
 # --- YOLOWrapper ---
-model = YOLOWrapper(model_cfg)
+model = YOLOWrapper(model_cfg)            # dict constructor (backward-compatible)
+model = YOLOWrapper.from_config(model_cfg)  # from_config (also accepts model section dict)
 # model_cfg shape:
 # {
 #   "path": "/path/to/model.pt",    # REQUIRED
@@ -598,6 +664,7 @@ model.exported_model_path   # Path | None
 # --- YOLOEWrapper (text/visual prompt support) ---
 model_cfg["load_options"]["lib_type"] = "YOLOE"
 model = YOLOEWrapper(model_cfg)
+model = YOLOEWrapper.from_config(model_cfg)  # also accepts model section dict
 # Additional model_cfg key:
 # "set_classes": None   # default: None — list[str] of class names to set on load
 

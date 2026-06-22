@@ -84,9 +84,9 @@ advanced:
     heartbeat_interval: 30
 
   # ----------------------------------------------------------------------------
-  # Data Sending (Semi-formatted)
+  # API Client Settings (Unified — replaces legacy datasend)
   # ----------------------------------------------------------------------------
-  datasend:
+  api:
     enabled: true
     base_url: "https://tamayuzdrf.transformsai.com/api/v1/"
     endpoints:
