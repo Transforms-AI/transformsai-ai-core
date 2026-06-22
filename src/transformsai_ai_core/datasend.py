@@ -18,7 +18,6 @@ from .central_logger import get_logger
 
 # --- Information About Script ---
 __name__ = "DataUploader with Caching"
-__version__ = "5.2.4" 
 __author__ = "TransformsAI"
 
 @dataclass
@@ -346,8 +345,8 @@ class DataUploader:
                  retry_delay: int = 1,
                  timeout: int = 300,
                  disable_caching: bool = False,
-                 cache_file_path: str = "uploader_cache.json",
-                 cache_files_dir: str = "uploader_cached_files",
+                  cache_file_path: str = ".core-datasend-cache.json",
+                  cache_files_dir: str = ".core-datasend-files",
                  max_cache_retries: int = 5,
                  cache_retry_interval: int = 100,
                  max_cache_items: int = 300,

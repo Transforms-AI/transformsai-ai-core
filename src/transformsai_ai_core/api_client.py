@@ -17,7 +17,6 @@ from .central_logger import get_logger
 
 # --- Information About Script ---
 __name__ = "Generic ApiClient"
-__version__ = "1.0.0"
 __author__ = "TransformsAI"
 
 # Types
@@ -358,7 +357,7 @@ class ApiClient:
         retry_on_status: Tuple[int, ...] = (408, 429, 500, 502, 503, 504),
         max_workers: Optional[int] = None,
         cache_enabled: bool = True,
-        cache_dir: str = "api_client_cache",
+        cache_dir: str = ".core-api-cache",
         cache_retry_interval: int = 100,
         max_cache_items: int = 300,
         max_cache_age_seconds: int = 86400,

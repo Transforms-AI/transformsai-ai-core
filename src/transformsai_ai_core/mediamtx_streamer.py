@@ -14,7 +14,6 @@ from .central_logger import get_logger
 
 # --- Information About Script ---
 __name__ = "Streamer for MediaMTX Server"
-__version__ = "2.1.2" 
 __author__ = "TransformsAI"
 
 class MediaMTXStreamer:
@@ -83,7 +82,7 @@ class MediaMTXStreamer:
         self.network_bottleneck_threshold = 0.100  # 100ms threshold
         
         # Create logs directory once at init (not per start_streaming call)
-        self.logs_dir = os.path.join(os.getcwd(), 'logs')
+        self.logs_dir = os.path.join(os.getcwd(), '.core-streamer-logs')
         os.makedirs(self.logs_dir, exist_ok=True)
         
         # Detect best encoder (hardware if available, software fallback)

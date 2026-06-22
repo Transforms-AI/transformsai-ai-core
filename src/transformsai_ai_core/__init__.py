@@ -3,7 +3,11 @@ TransformsAI Core Library
 A collection of utilities for AI vision applications.
 """
 
-__version__ = "3.2.5"
+from importlib.metadata import version, PackageNotFoundError
+try:
+    __version__ = version("transformsai-ai-core")
+except PackageNotFoundError:  # not installed (e.g. raw source tree)
+    __version__ = "0.0.0"
 __author__ = "TransformsAI"
 
 # Check YOLO availability early (cheap check, no imports)
