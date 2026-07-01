@@ -515,6 +515,37 @@ class ApiClient:
         delay = min(self.retry_backoff * (2 ** n), self.retry_backoff_max)
         self._shutdown_event.wait(delay)
 
+    _REDACT_HEADERS = ("authorization", "cookie", "set-cookie")
+
+    def _redact(self, headers: Dict[str, str]) -> Dict[str, str]:
+        """Copy headers with auth/secret values masked (never log credentials)."""
+        sensitive = {self.auth_header.lower(), *self._REDACT_HEADERS}
+        return {k: ("***" if k.lower() in sensitive else v) for k, v in headers.items()}
+
+    def _log_details(self, prepared: dict, headers: Dict[str, str],
+                     resp: Optional[Response] = None, error: Optional[BaseException] = None) -> None:
+        """Emit the full request/response context at DEBUG for a failed call."""
+        lines = ["Request:",
+                 f"  {prepared['method']} {prepared['url']}",
+                 f"  params:  {prepared.get('params')}",
+                 f"  headers: {self._redact(headers)}"]
+        if prepared.get("json") is not None:
+            lines.append(f"  json:    {prepared['json']}")
+        if prepared.get("data") is not None:
+            lines.append(f"  data:    {prepared['data']}")
+        files = prepared.get("files")
+        if files:
+            lines.append(f"  files:   {[fn for _, (fn, _, _) in files]}")
+        if resp is not None:
+            lines.append("Response:")
+            lines.append(f"  status:  {resp.status_code}")
+            lines.append(f"  elapsed: {resp.elapsed:.3f}s")
+            lines.append(f"  headers: {resp.headers}")
+            lines.append(f"  body:    {resp.text}")
+        if error is not None:
+            lines.append(f"Error: {type(error).__name__}: {error}")
+        self.logger.debug("\n".join(lines))
+
     def _execute(self, prepared: dict, from_cache_retry: bool = False) -> Response:
         """Run the retry loop for one prepared request, returning a uniform Response.
 
@@ -543,16 +574,22 @@ class ApiClient:
                 )
                 resp = self._wrap(r, attempts, from_cache_retry)
                 if resp.ok:
+                    self.logger.info(
+                        f"{name}: HTTP {resp.status_code} {prepared['method']} {prepared['url']} "
+                        f"({resp.elapsed:.3f}s, attempt {attempts}/{self.max_retries + 1})"
+                    )
                     return resp
                 last = resp
                 if r.status_code in self.retry_on_status and n < self.max_retries:
                     self.logger.warning(
                         f"{name}: HTTP {r.status_code} (attempt {attempts}/{self.max_retries + 1}), retrying"
                     )
+                    self._log_details(prepared, headers, resp=resp)
                     self._backoff(n)
                     continue
-                # fail fast (e.g. 4xx)
+                # exhausted retries (5xx) or fail fast (4xx)
                 self.logger.error(f"{name}: HTTP {r.status_code} -> {prepared['url']} (no retry)")
+                self._log_details(prepared, headers, resp=resp)
                 return resp
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
                 last = Response(
@@ -567,8 +604,10 @@ class ApiClient:
                     self._backoff(n)
                     continue
                 self.logger.error(f"{name}: {type(e).__name__} after {attempts} attempts -> {prepared['url']}")
+                self._log_details(prepared, headers, error=e)
             except Exception as e:
                 self.logger.error(f"{name}: unexpected error -> {e}")
+                self._log_details(prepared, headers, error=e)
                 return Response(
                     status_code=0, headers={}, text=str(e), content=b"",
                     url=prepared["url"], ok=False, elapsed=0.0,
