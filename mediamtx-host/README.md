@@ -1,8 +1,8 @@
 # MediaMTX Host Setup
 
-Deployment for the VPS that receives edge streams. Replaces the old
-hand-run `docker run ... bluenviron/mediamtx:1` container with a compose
-stack that also serves the **on-demand flag** used by
+Deployment for the VPS that receives edge streams. Replaces a hand-run
+`docker run ... bluenviron/mediamtx` container with a compose stack that
+also serves the **on-demand flag** used by
 `MediaMTXStreamer(on_demand=True)` — the edge pushes FFmpeg only while at
 least one viewer is watching, and stops shortly after the last viewer
 leaves.
@@ -12,8 +12,8 @@ leaves.
 | File | Purpose |
 |---|---|
 | `docker-compose.yml` | `mediamtx` + `demand` (flag server) + `demand-init` (stale-flag cleanup) |
-| `mediamtx.yml` | Full MediaMTX config (previous VPS config + the on-demand path hooks) |
-| `demand-nginx.conf` | nginx config for the flag server |
+| `mediamtx.yml` | Full MediaMTX config (server settings + the on-demand path hooks) |
+| `demand-nginx.conf` | nginx config for the flag server container |
 
 ## How it works
 
@@ -37,48 +37,136 @@ state — idle stays idle, live stays live.
 
 ## ⚠️ Image requirement
 
-The stack uses `bluenviron/mediamtx:latest-ffmpeg`, **not** the previous
-`bluenviron/mediamtx:1`. The default image is built `FROM scratch` with no
-shell, so the `sh -c 'echo on > ...'` hooks silently do nothing (MediaMTX
-logs "on demand command started" but nothing runs). The `-ffmpeg` variant
-is Alpine-based and has `sh`. Everything else about the server behaves the
-same.
+The stack uses `bluenviron/mediamtx:latest-ffmpeg`, **not** the default
+`bluenviron/mediamtx:latest`/`:1`. The default image is built
+`FROM scratch` with no shell, so the `sh -c 'echo on > ...'` hooks
+silently do nothing (MediaMTX logs "on demand command started" but
+nothing runs). The `-ffmpeg` variant is Alpine-based and has `sh`.
+Everything else about the server behaves the same.
 
-## Deploying (migration from the old container)
+---
+
+## Full setup from scratch
+
+Assumes a fresh Ubuntu VPS with a public IP and a domain you control.
+Concrete values below use the production host
+(`mediamtx.transformsai.com`, IP `161.97.126.245`) — substitute your own.
+
+### 1. DNS
+
+Point an A record at the VPS: `mediamtx.transformsai.com → 161.97.126.245`.
+
+### 2. Install Docker and nginx
 
 ```bash
-# on the VPS, from this directory
-sudo docker rm -f mediamtx          # stop the old hand-run container
-sudo docker compose up -d
-sudo docker compose logs -f mediamtx
+curl -fsSL https://get.docker.com | sudo sh
+sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx
 ```
 
-The compose file carries over everything from the old run command: the
-port mappings, `MTX_RTSPTRANSPORTS=tcp`,
-`MTX_WEBRTCADDITIONALHOSTS=161.97.126.245,mediamtx.transformsai.com`, and
-the 1 GB / 2 CPU resource limits. `demand-init` wipes leftover flags on
-every `up` so a stale `on` from before a reboot can't make an edge stream
-to nobody.
+### 3. Get this folder onto the VPS
 
-## Exposing the demand flag
+```bash
+git clone https://github.com/Transforms-AI/transformsai-ai-core.git
+cd transformsai-ai-core/mediamtx-host
+```
 
-The `demand` nginx container binds to `127.0.0.1:8880` on the host. Add
-one location to the public nginx that already terminates TLS for
-`mediamtx.transformsai.com`:
+(Or `scp -r mediamtx-host/ user@vps:~/` — the folder is self-contained.)
+
+If your domain/IP differ, edit `MTX_WEBRTCADDITIONALHOSTS` in
+`docker-compose.yml`.
+
+### 4. Start the stack
+
+```bash
+# if migrating from an old hand-run container, remove it first:
+sudo docker rm -f mediamtx 2>/dev/null
+
+sudo docker compose up -d
+sudo docker compose logs -f mediamtx    # ctrl-c to detach
+```
+
+This starts:
+- **mediamtx** — RTSP :8554 (edge publishes), WebRTC :8889 + :8189/udp
+  (viewers), Control API :9997, with the on-demand hooks active.
+- **demand** — flag server on `127.0.0.1:8880` (host-local only; the
+  public nginx proxies to it in the next step).
+- **demand-init** — one-shot that wipes stale flags on every `up`, so a
+  leftover `on` from before a reboot can't make an edge stream to nobody.
+
+### 5. TLS certificate
+
+```bash
+sudo certbot certonly --nginx -d mediamtx.transformsai.com
+```
+
+### 6. Public nginx site
+
+Create `/etc/nginx/sites-available/mediamtx.transformsai.com` with the
+**complete file** below. It does two things: proxies everything to
+MediaMTX's WebRTC server (:8889) for viewing, and proxies `/demand/` to
+the flag container (:8880) for the edges. The `location /demand/` block
+must come as a sibling of `location /` — nginx picks the longest prefix
+match, so `/demand/...` requests go to the flag server and everything
+else to MediaMTX.
 
 ```nginx
-location /demand/ { proxy_pass http://127.0.0.1:8880; }
+server {
+    listen 443 ssl;
+    server_name mediamtx.transformsai.com;
+
+    # Demand flags for on-demand edge publishing
+    # (served by the mediamtx-demand container, bound to 127.0.0.1:8880)
+    location /demand/ {
+        proxy_pass http://127.0.0.1:8880;
+    }
+
+    location / {
+        # Proxy to MediaMTX WebRTC HTTP port (default 8889)
+        proxy_pass http://127.0.0.1:8889;
+
+        # Essential headers for WebRTC/WebSocket signaling
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+
+        # Pass client IP to MediaMTX
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    ssl_certificate /etc/letsencrypt/live/mediamtx.transformsai.com/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/mediamtx.transformsai.com/privkey.pem; # managed by Certbot
+}
 ```
 
-That gives the edges `https://mediamtx.transformsai.com/demand/cam_sn_<id>`
-under the existing hostname/cert — which is exactly the URL the library
-derives from `mediamtx_ip`, so no `demand_url` override is needed.
+Enable and reload:
 
-(No public proxy? Change the port mapping to `"8880:80"` and set
-`demand_url: "http://<host>:8880/demand/cam_sn_{camera_sn_id}"` on the
-edge instead.)
+```bash
+sudo ln -sf /etc/nginx/sites-available/mediamtx.transformsai.com /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
 
-## Edge config to match
+> Getting a **302 redirect** with `Access-Control-Allow-*` headers from
+> `curl https://<host>/demand/cam_sn_x`? That's MediaMTX answering — the
+> `/demand/` location is missing or in the wrong server block, so the
+> request fell through to :8889.
+
+### 7. Open the firewall
+
+Besides 443, edges and viewers need these reachable:
+
+```bash
+sudo ufw allow 443/tcp    # WebRTC signaling + demand flags (via nginx)
+sudo ufw allow 8554/tcp   # RTSP publish from edges
+sudo ufw allow 8189/udp   # WebRTC media (ICE)
+```
+
+(Ports 8880 and 9997 stay private; 1935/8888/8890 are only needed if you
+enable RTMP/HLS/SRT in `mediamtx.yml`.)
+
+### 8. Configure the edges
 
 ```yaml
 advanced:
@@ -92,8 +180,69 @@ advanced:
     # demand_url: ""
 ```
 
-`on_demand: false` (the default) keeps today's always-on behavior; nothing
-else changes.
+`on_demand: false` (the default) keeps always-on behavior; nothing else
+changes. Viewers watch at
+`https://mediamtx.transformsai.com/live/cam_sn_<id>/`.
+
+### 9. Verify
+
+**VPS half (no edge needed):**
+
+```bash
+# flag absent -> 404 is the correct idle answer
+curl -i https://mediamtx.transformsai.com/demand/cam_sn_test1
+```
+
+Open `https://mediamtx.transformsai.com/live/cam_sn_test1/` in a browser —
+the page should **hold/spin** (that's `runOnDemandStartTimeout` working),
+not instantly fail. While it spins:
+
+```bash
+curl https://mediamtx.transformsai.com/demand/cam_sn_test1   # -> on
+# close the tab, wait ~25s (runOnDemandCloseAfter)
+curl https://mediamtx.transformsai.com/demand/cam_sn_test1   # -> off
+```
+
+**Full loop (with an edge):** run a quick publisher on any machine with
+the library:
+
+```python
+# demo_on_demand.py  ->  uv run python demo_on_demand.py
+import time, cv2, numpy as np
+from transformsai_ai_core import MediaMTXStreamer
+
+s = MediaMTXStreamer("mediamtx.transformsai.com", 8554, "test1",
+                     fps=15, frame_width=640, frame_height=480,
+                     on_demand=True)
+s.start_streaming()
+frame = np.zeros((480, 640, 3), dtype=np.uint8)
+try:
+    while True:
+        frame[:] = 40
+        cv2.putText(frame, time.strftime("%H:%M:%S"), (120, 250),
+                    cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 3)
+        s.update_frame(frame)
+        time.sleep(1 / 15)
+finally:
+    s.stop_streaming()
+```
+
+1. **Idle**: no FFmpeg starts, no "Streaming started" log — zero upstream.
+2. **Wake**: open the viewer URL — ticking clock appears within ~10 s;
+   console logs `Viewer demand detected - starting stream`.
+3. **Teardown**: close the tab; ~30–35 s later the console logs
+   `No viewer demand - stopping stream` and FFmpeg exits.
+
+**Hook execution check** (should appear when a viewer connects):
+
+```bash
+sudo docker compose logs mediamtx | grep -i "on demand"
+```
+
+If you see "on demand command started" but the flag file never appears,
+you are on the shell-less scratch image — use `latest-ffmpeg`.
+
+---
 
 ## Tuning
 
@@ -105,26 +254,6 @@ else changes.
   `demand_grace_period`. Lower `runOnDemandCloseAfter` or `grace_period`
   to trim, but keep `grace_period` ≥ 5 s.
 
-## Verifying
-
-```bash
-# 1) Flag starts absent -> edge stays idle (404 is the correct idle answer)
-curl -i https://mediamtx.transformsai.com/demand/cam_sn_<id>
-
-# 2) Open the viewer: https://mediamtx.transformsai.com/live/cam_sn_<id>/
-#    The page should hold (not 404) and show video within ~10s.
-curl https://mediamtx.transformsai.com/demand/cam_sn_<id>   # now "on"
-
-# 3) Close the viewer; after ~20s the flag flips
-curl https://mediamtx.transformsai.com/demand/cam_sn_<id>   # now "off"
-#    and the edge's FFmpeg exits ~10s later (check .core-streamer-logs on the edge)
-
-# Hook execution check (should appear when a viewer connects):
-sudo docker compose logs mediamtx | grep -i "on demand"
-# If you see "on demand command started" but the flag file never appears,
-# you are on the shell-less scratch image — use latest-ffmpeg.
-```
-
 ## Notes
 
 - `mediamtx.yml` contains the Control API credentials (`transformsai`
@@ -133,3 +262,7 @@ sudo docker compose logs mediamtx | grep -i "on demand"
 - The demand endpoint is public read-only. The flags leak nothing beyond
   "someone is watching camera X"; restrict by edge egress IP or a
   shared-secret header in `demand-nginx.conf` if that matters.
+- No public reverse proxy at all? Change the demand port mapping to
+  `"8880:80"` in `docker-compose.yml` and set
+  `demand_url: "http://<host>:8880/demand/cam_sn_{camera_sn_id}"` on the
+  edge instead.

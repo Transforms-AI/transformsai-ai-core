@@ -141,6 +141,11 @@ advanced:
     bitrate: "1500k"
     hw_encode: false            # auto-detect GPU encoder
     debug_log_interval: 60.0
+    on_demand: false            # true = push only while a viewer is watching (see §MediaMTX Streaming)
+    demand_url: ""              # blank = derive https://{mediamtx_ip}/demand/cam_sn_{camera_sn_id}
+    demand_poll_interval: 3.0   # seconds between outbound demand polls
+    demand_grace_period: 10.0   # demand must stay OFF this long before FFmpeg stops (keep >= 5)
+    demand_timeout: 5.0         # HTTP timeout per poll
     encoder:
       preset: ultrafast
       codec: copy               # copy | libx264
@@ -242,6 +247,21 @@ streamer.update_frame(frame)      # call in loop — non-blocking
 streamer.get_rtsp_url(); streamer.get_webrtc_url(); streamer.get_hls_url()
 streamer.stop_streaming()
 ```
+
+### On-demand publishing (`on_demand: true`)
+
+With `on_demand: true`, `start_streaming()` starts a supervisor thread instead of FFmpeg: it polls a
+demand flag on the MediaMTX host (derived as `https://{mediamtx_ip}/demand/cam_sn_{camera_sn_id}`)
+and launches FFmpeg only while a viewer is watching, stopping it `demand_grace_period` seconds after
+demand ends. Idle cost is one boolean check per `update_frame` call — zero upstream bandwidth. Your
+`start → update_frame loop → stop` code is unchanged, and `on_demand: false` (default) keeps
+always-on behavior.
+
+Fail-safe: a failed/unreadable poll never changes state (idle stays idle, live stays live). For
+tests or alternate backends, inject `demand_check=callable` (returns bool) via `from_config`
+overrides. **The server side needs matching setup** — MediaMTX `runOnDemand` hooks plus the flag
+server; see [mediamtx-host/README.md](mediamtx-host/README.md) for the full from-scratch VPS
+tutorial (docker compose, nginx, TLS, verification).
 
 ---
 
