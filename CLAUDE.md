@@ -34,6 +34,8 @@ uv run transformsaicore download models --config config.yaml
 
 All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses `__getattr__`-based lazy imports to defer heavy module loads (saves 50–100 MB RSS on edge devices).
 
+`mediamtx-host/` is not library code: it is the VPS deployment (docker compose + `mediamtx.yml` + demand-flag server) that pairs with `MediaMTXStreamer`'s `on_demand` mode. See [mediamtx-host/README.md](mediamtx-host/README.md).
+
 ### Core Modules
 
 **`central_logger.py`** — Loguru-based structured logger.
