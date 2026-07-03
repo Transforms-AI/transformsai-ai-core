@@ -21,10 +21,12 @@ class MediaMTXStreamer:
     MediaMTX streamer with improved diagnostics and stream information.
     """
     
-    def __init__(self, mediamtx_ip, rtsp_port, camera_sn_id, fps=30, 
+    def __init__(self, mediamtx_ip, rtsp_port, camera_sn_id, fps=30,
                  frame_width=1920, frame_height=1080, bitrate="1500k",
                  debug_log_interval=60.0, encoder_preset="ultrafast",
-                 encoder_codec="copy", stream_queue_size=2, hw_encode=False):
+                 encoder_codec="copy", stream_queue_size=2, hw_encode=False,
+                 on_demand=False, demand_url="", demand_poll_interval=3.0,
+                 demand_grace_period=10.0, demand_timeout=5.0, demand_check=None):
         self.mediamtx_ip = mediamtx_ip
         self.rtsp_port = rtsp_port
         self.camera_sn_id = camera_sn_id
@@ -33,19 +35,34 @@ class MediaMTXStreamer:
         self.frame_height = frame_height
         self.bitrate = bitrate
         self.webrtc_port = 8889  # Default MediaMTX WebRTC port
-        
+
         # Encoder settings for resource optimization
         self.encoder_preset = encoder_preset  # ultrafast, fast, medium, etc.
         self.encoder_codec = encoder_codec  # 'copy' to avoid re-encoding, or 'libx264'
         self.hw_encode = hw_encode  # Auto-detect hardware encoder if True
         self.stream_queue_size = stream_queue_size  # Async queue depth
-        
+
+        # On-demand publishing: gate the FFmpeg push on viewer demand
+        self.on_demand = on_demand
+        self.demand_url = demand_url
+        self.demand_poll_interval = demand_poll_interval
+        self.demand_grace_period = demand_grace_period
+        self.demand_timeout = demand_timeout
+        self.demand_check = demand_check  # optional Callable[[], bool] override
+
         # Setup logging using central logger
         self.logger = get_logger(self)
-        
+
         # Build URLs using helper methods
         self.rtsp_url = self._build_rtsp_url()
-        
+        self._demand_url = self._build_demand_url()
+
+        # Demand supervisor state
+        self._demand_thread = None
+        self._demand_stop_event = threading.Event()
+        self._demand_off_since = None
+        self._demand_client = None
+
         # Process management
         self.ffmpeg_process = None
         self.ffmpeg_log_file = None  # Track log file for cleanup
@@ -111,7 +128,16 @@ class MediaMTXStreamer:
             return f"http://{self.mediamtx_ip}:{self.webrtc_port}/live/cam_sn_{self.camera_sn_id}/"
         else:
             return f"https://{self.mediamtx_ip}/live/cam_sn_{self.camera_sn_id}/"
-    
+
+    def _build_demand_url(self):
+        """Build the demand-flag URL polled while on_demand is enabled.
+        Derives from mediamtx_ip (same hostname/TLS/reverse-proxy as the WebRTC
+        URL); set demand_url explicitly for bare-IP / non-standard hosts.
+        """
+        if self.demand_url:
+            return self.demand_url.format(camera_sn_id=self.camera_sn_id)
+        return f"https://{self.mediamtx_ip}/demand/cam_sn_{self.camera_sn_id}"
+
     def _detect_best_encoder(self):
         """Detect best available hardware encoder, fallback to software.
         Priority: NVIDIA > Intel QSV > AMD VAAPI > ARM V4L2M2M > Software
@@ -191,6 +217,20 @@ class MediaMTXStreamer:
             return preset
     
     def start_streaming(self):
+        """Start streaming. In on-demand mode, starts the demand supervisor
+        (FFmpeg launches only when a viewer is watching); otherwise starts
+        FFmpeg immediately."""
+        if self.on_demand:
+            return self._start_demand_supervisor()
+        return self._ensure_ffmpeg_started()
+
+    def stop_streaming(self):
+        """Stop the streaming process (and the demand supervisor, if any)."""
+        if self.on_demand:
+            self._stop_demand_supervisor()
+        self._ensure_ffmpeg_stopped()
+
+    def _ensure_ffmpeg_started(self):
         """Start FFmpeg streaming process with diagnostics."""
         if self.is_streaming:
             return True
@@ -302,19 +342,21 @@ class MediaMTXStreamer:
         self.logger.info(f"[Stream] WebRTC URL: {self._build_webrtc_url()}")
         self.logger.info(f"[Stream] Resolution: {self.frame_width}x{self.frame_height} @ {self.fps}fps, Bitrate: {self.bitrate}")
     
-    def stop_streaming(self):
-        """Stop the streaming process."""
-        if not self.is_streaming:
+    def _ensure_ffmpeg_stopped(self):
+        """Stop the FFmpeg process, reaping it even if is_streaming was
+        already flipped off (e.g. after the process died)."""
+        if not self.is_streaming and not self.ffmpeg_process and not self._writer_thread:
             return
-        
+
         self.is_streaming = False
-        
+
         # Stop async writer thread
         if self._writer_thread and self._writer_thread.is_alive():
             self._writer_stop_event.set()
             self._writer_thread.join(timeout=2.0)
             self.logger.info("[Stream] Async writer thread stopped")
-        
+        self._writer_thread = None
+
         if self.ffmpeg_process:
             try:
                 # Graceful shutdown
@@ -351,7 +393,91 @@ class MediaMTXStreamer:
                 self.logger.warning(f"[Stream] Error closing log file: {e}")
         
         self.logger.info("[Stream] Streaming stopped")
-    
+
+    def _start_demand_supervisor(self):
+        """Start the background thread that polls viewer demand and gates
+        FFmpeg on it. Idempotent."""
+        if self._demand_thread and self._demand_thread.is_alive():
+            return True
+
+        if self.demand_check is None and self._demand_client is None:
+            from .api_client import ApiClient
+            self._demand_client = ApiClient(
+                base_url=None,
+                timeout=int(max(1, round(self.demand_timeout))),
+                max_retries=0,
+                cache_enabled=False,
+                max_workers=1,
+            )
+
+        self._demand_off_since = None
+        self._demand_stop_event.clear()
+        self._demand_thread = threading.Thread(
+            target=self._demand_supervisor_loop,
+            name=f"MediaMTX_Demand_{self.camera_sn_id}",
+            daemon=True
+        )
+        self._demand_thread.start()
+        self.logger.info(f"[Stream] Demand supervisor started, polling {self._demand_url} "
+                         f"every {self.demand_poll_interval}s (grace {self.demand_grace_period}s)")
+        return True
+
+    def _stop_demand_supervisor(self):
+        """Stop the demand supervisor thread and its poll client."""
+        if self._demand_thread and self._demand_thread.is_alive():
+            self._demand_stop_event.set()
+            self._demand_thread.join(timeout=self.demand_poll_interval + 2.0)
+            self.logger.info("[Stream] Demand supervisor stopped")
+        self._demand_thread = None
+        if self._demand_client:
+            self._demand_client.shutdown()
+            self._demand_client = None
+
+    def _demand_supervisor_loop(self):
+        """Poll demand and start/stop FFmpeg accordingly. Fail-safe: an
+        unknown poll result (None) leaves the current state alone."""
+        while not self._demand_stop_event.is_set():
+            demand = self._check_demand()
+
+            if demand is True:
+                self._demand_off_since = None
+                if not self.is_streaming:
+                    self.logger.info("[Stream] Viewer demand detected - starting stream")
+                    self._ensure_ffmpeg_started()
+            elif demand is False:
+                if self.is_streaming:
+                    now = time.time()
+                    if self._demand_off_since is None:
+                        self._demand_off_since = now
+                    elif now - self._demand_off_since >= self.demand_grace_period:
+                        self.logger.info("[Stream] No viewer demand - stopping stream")
+                        self._ensure_ffmpeg_stopped()
+                        self._demand_off_since = None
+                else:
+                    self._demand_off_since = None
+
+            self._demand_stop_event.wait(self.demand_poll_interval)
+
+    def _check_demand(self):
+        """Return True (viewer demand), False (no demand), or None (unknown -
+        poll failed or unrecognized body). Never raises."""
+        if self.demand_check is not None:
+            try:
+                return bool(self.demand_check())
+            except Exception as e:
+                self.logger.warning(f"[Stream] demand_check raised: {e}")
+                return None
+
+        response = self._demand_client.get(self._demand_url)
+        if not response.ok:
+            return None
+        body = response.text.strip().lower()
+        if body in ("on", "1", "true", "yes"):
+            return True
+        if body in ("off", "0", "false", "no", ""):
+            return False
+        return None
+
     def update_frame(self, frame):
         """
         Send frame to stream with improved error handling and performance tracking.
@@ -367,15 +493,19 @@ class MediaMTXStreamer:
         if self.ffmpeg_process.poll() is not None:
             # Process died, but don't restart immediately
             self.logger.warning(f"[FFmpeg] Process died (exit code: {self.ffmpeg_process.returncode})")
-            self.is_streaming = False
-            self.stop_streaming()
-            
+            self._ensure_ffmpeg_stopped()
+
+            # In on-demand mode the supervisor re-launches on the next poll
+            # if demand is still present
+            if self.on_demand:
+                return False
+
             # Only attempt restart if not too frequent
             if frame_start_time - self.last_restart_time > 10.0:  # 10 second cooldown
                 self.logger.info("[Stream] Attempting to restart stream...")
-                if self.start_streaming():
+                if self._ensure_ffmpeg_started():
                     return self.update_frame(frame)  # Retry once
-            
+
             return False
         
         try:
@@ -642,6 +772,11 @@ class MediaMTXStreamer:
             "bitrate": cfg.get("bitrate", "1500k"),
             "hw_encode": cfg.get("hw_encode", False),
             "debug_log_interval": cfg.get("debug_log_interval", 60.0),
+            "on_demand": cfg.get("on_demand", False),
+            "demand_url": cfg.get("demand_url", ""),
+            "demand_poll_interval": cfg.get("demand_poll_interval", 3.0),
+            "demand_grace_period": cfg.get("demand_grace_period", 10.0),
+            "demand_timeout": cfg.get("demand_timeout", 5.0),
             "encoder_preset": encoder.get("preset", "ultrafast"),
             "encoder_codec": encoder.get("codec", "copy"),
             "stream_queue_size": encoder.get("queue_size", 2),

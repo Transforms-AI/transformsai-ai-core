@@ -173,6 +173,11 @@ advanced:
     bitrate: "1500k"
     hw_encode: false
     debug_log_interval: 60.0
+    on_demand: false     # true = push only while a viewer is watching (edge polls a VPS demand flag)
+    demand_url: ""       # blank = derive https://{mediamtx_ip}/demand/cam_sn_{camera_sn_id}
+    demand_poll_interval: 3.0
+    demand_grace_period: 10.0
+    demand_timeout: 5.0
     encoder:
       preset: ultrafast
       codec: copy

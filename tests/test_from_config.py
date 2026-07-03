@@ -218,7 +218,43 @@ assert streamer_def.fps == 30
 assert streamer_def.encoder_preset == "ultrafast"
 assert streamer_def.encoder_codec == "copy"
 assert streamer_def.stream_queue_size == 2
+assert streamer_def.on_demand is False  # backward-compat: always-on by default
 print("✓ MediaMTXStreamer defaults from empty config")
+
+
+print_test_header("9a", "MediaMTXStreamer.from_config on-demand knobs + derived demand URL")
+od_cfg = {
+    "mediamtx_ip": "vps.example.com",
+    "on_demand": True,
+    "demand_poll_interval": 1.5,
+    "demand_grace_period": 20.0,
+    "demand_timeout": 4.0,
+}
+streamer_od = MediaMTXStreamer.from_config(od_cfg, camera_sn_id="cam1")
+assert streamer_od.on_demand is True
+assert streamer_od.demand_poll_interval == 1.5
+assert streamer_od.demand_grace_period == 20.0
+assert streamer_od.demand_timeout == 4.0
+# Blank demand_url -> derived from mediamtx_ip + per-camera camera_sn_id override
+assert streamer_od._demand_url == "https://vps.example.com/demand/cam_sn_cam1"
+print("✓ On-demand knobs map through; demand URL derived from mediamtx_ip")
+
+# Explicit demand_url template wins over derivation
+streamer_ov = MediaMTXStreamer.from_config(
+    {**od_cfg, "demand_url": "http://10.1.2.3:8080/demand/{camera_sn_id}"},
+    camera_sn_id="cam2",
+)
+assert streamer_ov._demand_url == "http://10.1.2.3:8080/demand/cam2"
+print("✓ Explicit demand_url override wins")
+
+# LivestreamConfig model carries the new fields with safe defaults
+ls_model = LivestreamConfig()
+assert ls_model.on_demand is False
+assert ls_model.demand_url == ""
+assert ls_model.demand_poll_interval == 3.0
+assert ls_model.demand_grace_period == 10.0
+assert ls_model.demand_timeout == 5.0
+print("✓ LivestreamConfig schema defaults")
 
 
 # =============================================================================

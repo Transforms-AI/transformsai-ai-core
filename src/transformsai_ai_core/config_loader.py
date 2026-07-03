@@ -368,7 +368,9 @@ def get_formatted_fields() -> dict[str, list[str]]:
                          "max_cache_retries", "pool_connections", "pool_maxsize"],
         "advanced.livestream": ["enabled", "mediamtx_ip", "rtsp_port", "camera_sn_id",
                                 "fps", "frame_width", "frame_height", "bitrate",
-                                "hw_encode", "debug_log_interval", "encoder"],
+                                "hw_encode", "debug_log_interval", "encoder",
+                                "on_demand", "demand_url", "demand_poll_interval",
+                                "demand_grace_period", "demand_timeout"],
         "advanced.livestream.encoder": ["preset", "codec", "queue_size"],
     }
 

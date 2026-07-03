@@ -153,6 +153,11 @@ class LivestreamConfig(BaseModel):
     hw_encode: bool = Field(default=False, description="Auto-detect hardware encoder")
     debug_log_interval: float = Field(default=60.0, description="Debug log interval in seconds")
     encoder: StreamEncoderSettings = Field(default_factory=StreamEncoderSettings, description="Encoder optimization")
+    on_demand: bool = Field(default=False, description="Only push the stream while a viewer is watching. False = always-on (current behavior)")
+    demand_url: str = Field(default="", description="Optional override for the demand URL; blank = derive https://{mediamtx_ip}/demand/cam_sn_{camera_sn_id}")
+    demand_poll_interval: float = Field(default=3.0, description="Seconds between outbound demand polls")
+    demand_grace_period: float = Field(default=10.0, description="Seconds demand must stay OFF before stopping FFmpeg")
+    demand_timeout: float = Field(default=5.0, description="HTTP timeout per demand poll (seconds)")
     settings: dict[str, Any] = Field(default_factory=dict, description="Freeform settings (NOT consumed by from_config)")
     extras: dict[str, Any] = Field(default_factory=dict, description="Sanctioned freeform channel for unmodeled fields")
 
