@@ -58,6 +58,7 @@ class EndpointProfile:
     headers: Optional[Dict[str, str]] = None
     content_type: Optional[str] = None
     cache: Optional[bool] = None
+    persist: Optional[bool] = None
 
 
 def _read_content(content: Any) -> bytes:
@@ -88,6 +89,13 @@ class _DirCache:
     (a bad folder is skipped, never wiping the cache), O(1) add/remove (no
     global manifest rewrite). The in-memory state is only the list of folder
     ids; request bytes are read lazily at retry time to keep memory flat.
+
+    Entries added with ``persistent=True`` are reusable saved requests rather
+    than transient failure retries: they are exempt from age/item-count/
+    retry-count eviction, excluded from the automatic background retry loop,
+    and never removed on success. They stay on disk completely intact until
+    an explicit ``remove()`` call — the point being that they can be reused
+    (via ``ApiClient.resend_cached``) any number of times, whenever needed.
     """
 
     SCHEMA = 1
@@ -159,8 +167,13 @@ class _DirCache:
         os.replace(tmp, path)
 
     # --- add ---
-    def add(self, prepared: dict) -> Optional[str]:
-        """Persist a failed request to a new folder. Returns the folder id (or None if not cached)."""
+    def add(self, prepared: dict, persistent: bool = False) -> Optional[str]:
+        """Persist a request to a new folder. Returns the folder id (or None if not cached).
+
+        ``persistent=True`` marks this as a saved, reusable request: it is kept
+        completely intact on disk (no age/count/retry-count eviction, never
+        auto-removed on success) until explicitly deleted.
+        """
         with self._lock:
             created = time.time()
             fid = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')}_{uuid.uuid4().hex[:8]}"
@@ -220,6 +233,7 @@ class _DirCache:
                     "created_at": created,
                     "retry_count": 0,
                     "last_attempt_at": None,
+                    "persistent": persistent,
                 }
                 self._write_meta(tmp, meta)
                 os.replace(tmp, final)
@@ -281,6 +295,11 @@ class _DirCache:
         meta = self._read_meta(fid)
         return int(meta.get("retry_count", 0)) if meta else self.max_cache_retries
 
+    def is_persistent(self, fid: str) -> bool:
+        """Saved-for-reuse entries are exempt from every automatic eviction path."""
+        meta = self._read_meta(fid)
+        return bool(meta.get("persistent", False)) if meta else False
+
     def bump_retry(self, fid: str) -> None:
         with self._lock:
             meta = self._read_meta(fid)
@@ -294,13 +313,43 @@ class _DirCache:
                 self.logger.warning(f"Failed to persist retry_count for {fid}: {e}")
 
     def eligible(self) -> List[str]:
-        """Folder ids that are still within age and retry-count limits."""
+        """Non-persistent folder ids still within age and retry-count limits.
+
+        Persistent (saved-for-reuse) entries are deliberately excluded: they
+        are only ever sent via an explicit ``ApiClient.resend_cached`` call,
+        never by the automatic background retry loop.
+        """
         with self._lock:
             self._enforce_limits()
             out = []
             for fid in list(self._ids):
+                if self.is_persistent(fid):
+                    continue
                 if self.retry_count(fid) < self.max_cache_retries:
                     out.append(fid)
+            return out
+
+    def list(self) -> List[dict]:
+        """Lightweight metadata for every cached request (no file bytes read).
+
+        Powers the first-class reuse API: inspect what's saved, then act on
+        an id via ``ApiClient.resend_cached`` / ``remove_cached``.
+        """
+        with self._lock:
+            out = []
+            for fid in self._ids:
+                meta = self._read_meta(fid)
+                if meta is None:
+                    continue
+                out.append({
+                    "id": fid,
+                    "name": meta.get("name"),
+                    "method": meta.get("method"),
+                    "url": meta.get("url"),
+                    "persistent": meta.get("persistent", False),
+                    "retry_count": meta.get("retry_count", 0),
+                    "created_at": meta.get("created_at"),
+                })
             return out
 
     def remove(self, fid: str) -> None:
@@ -313,17 +362,21 @@ class _DirCache:
             self._ids.remove(fid)
 
     def _enforce_limits(self) -> None:
-        """Caller must hold the lock. Drop aged-out (any number) then excess (oldest-first)."""
+        """Caller must hold the lock. Drop aged-out (any number) then excess (oldest-first).
+
+        Persistent entries never participate in either check.
+        """
         if self.max_cache_age_seconds > 0:
             now = time.time()
-            for fid in list(self._ids):
+            for fid in [f for f in self._ids if not self.is_persistent(f)]:
                 created = self._folder_epoch(fid)
                 if created is not None and now - created > self.max_cache_age_seconds:
                     self.logger.debug(f"Dropping aged-out cached request {fid}")
                     self._remove_nolock(fid)
-        if self.max_cache_items > 0 and len(self._ids) > self.max_cache_items:
-            excess = len(self._ids) - self.max_cache_items
-            for fid in self._ids[:excess]:  # _ids is sorted -> oldest first
+        transient = [f for f in self._ids if not self.is_persistent(f)]  # _ids sorted -> oldest first
+        if self.max_cache_items > 0 and len(transient) > self.max_cache_items:
+            excess = len(transient) - self.max_cache_items
+            for fid in transient[:excess]:
                 self.logger.debug(f"Dropping excess cached request {fid}")
                 self._remove_nolock(fid)
 
@@ -627,10 +680,14 @@ class ApiClient:
         # auto: cache writes on failure, never GET/HEAD/OPTIONS (replaces is_heartbeat)
         return method.upper() not in ("GET", "HEAD", "OPTIONS")
 
-    def _send_and_maybe_cache(self, prepared: dict, cache: Optional[bool]) -> Response:
+    def _send_and_maybe_cache(self, prepared: dict, cache: Optional[bool], persist: bool = False) -> Response:
         resp = self._execute(prepared)
-        if not resp.ok and self.cache is not None and self._should_cache(prepared["method"], cache):
-            self.cache.add(prepared)
+        if self.cache is not None:
+            if persist:
+                # keep a permanent, reusable copy regardless of outcome
+                self.cache.add(prepared, persistent=True)
+            elif not resp.ok and self._should_cache(prepared["method"], cache):
+                self.cache.add(prepared)
         return resp
 
     def _done_callback(self, future: Future) -> None:
@@ -644,21 +701,27 @@ class ApiClient:
                 params: Optional[Dict] = None, files: Optional[Dict] = None,
                 headers: Optional[Dict] = None, timeout: Optional[int] = None,
                 base_url: Optional[str] = None, content_type: Optional[str] = None,
-                cache: Optional[bool] = None, async_: bool = False,
+                cache: Optional[bool] = None, persist: bool = False, async_: bool = False,
                 name: Optional[str] = None) -> Union[Response, "Future[Response]"]:
         """Generic single-dispatch request. Any verb works.
 
         ``async_=False`` (default) blocks through retries and returns a ``Response``;
         ``async_=True`` submits to the executor and returns a ``Future[Response]``.
+
+        ``persist=True`` saves a permanent, reusable copy of this request to the
+        cache regardless of success/failure — exempt from age/item-count/
+        retry-count eviction, never auto-removed. Reuse it later with
+        ``resend_cached(fid)`` (the id is in ``list_cached()``); delete with
+        ``remove_cached(fid)``.
         """
         prepared = self._prepare(method, path, json, data, params, files, headers,
                                  base_url, content_type, name)
         prepared["timeout"] = timeout or self.timeout
         if async_:
-            future = self.executor.submit(self._send_and_maybe_cache, prepared, cache)
+            future = self.executor.submit(self._send_and_maybe_cache, prepared, cache, persist)
             future.add_done_callback(self._done_callback)
             return future
-        return self._send_and_maybe_cache(prepared, cache)
+        return self._send_and_maybe_cache(prepared, cache, persist)
 
     # convenience verbs
     def get(self, path: str = "", **kw):
@@ -690,6 +753,7 @@ class ApiClient:
                 headers=profile.get("headers"),
                 content_type=profile.get("content_type"),
                 cache=profile.get("cache"),
+                persist=profile.get("persist"),
             )
         else:
             raise TypeError(f"Unsupported endpoint profile type: {type(profile)!r}")
@@ -699,6 +763,7 @@ class ApiClient:
              params: Optional[Dict] = None, files: Optional[Dict] = None,
              headers: Optional[Dict] = None, timeout: Optional[int] = None,
              content_type: Optional[str] = None, cache: Optional[bool] = None,
+             persist: Optional[bool] = None,
              async_: bool = False) -> Union[Response, "Future[Response]"]:
         """Resolve a registered endpoint profile and send. Precedence: per-call arg > profile > client default."""
         if name not in self._endpoints:
@@ -714,8 +779,69 @@ class ApiClient:
             timeout=timeout,
             content_type=content_type if content_type is not None else p.content_type,
             cache=cache if cache is not None else p.cache,
+            persist=persist if persist is not None else bool(p.persist),
             async_=async_, name=name,
         )
+
+    # ------------------------------------------------------------------ reusable requests (first-class)
+    def save_request(self, method: str, path: str = "", *, json: Any = None, data: Any = None,
+                      params: Optional[Dict] = None, files: Optional[Dict] = None,
+                      headers: Optional[Dict] = None, content_type: Optional[str] = None,
+                      base_url: Optional[str] = None, name: Optional[str] = None) -> Optional[str]:
+        """Build and persist a request to disk for later reuse, without sending it now.
+
+        Returns the cache id (or ``None`` if caching is disabled / the save
+        failed). The saved request is kept completely intact — exempt from
+        age/item-count/retry-count eviction — until you explicitly send it
+        with ``resend_cached(fid)`` and/or delete it with ``remove_cached(fid)``.
+        """
+        if self.cache is None:
+            self.logger.warning("Cache is disabled; cannot save a request for reuse")
+            return None
+        prepared = self._prepare(method, path, json, data, params, files, headers,
+                                 base_url, content_type, name)
+        prepared["timeout"] = self.timeout
+        return self.cache.add(prepared, persistent=True)
+
+    def list_cached(self) -> List[dict]:
+        """List every cached request (pending failure-retries and saved-for-reuse), newest last.
+
+        Each entry: ``id``, ``name``, ``method``, ``url``, ``persistent``,
+        ``retry_count``, ``created_at``.
+        """
+        if self.cache is None:
+            return []
+        return self.cache.list()
+
+    def resend_cached(self, fid: str) -> Optional[Response]:
+        """Explicitly (re)send a cached request by id. Returns ``None`` if it doesn't exist.
+
+        Persistent (saved-for-reuse) entries are never removed by this call,
+        regardless of outcome, so they can be resent again later. Transient
+        (auto-cached failure) entries follow the usual policy: removed on
+        success, dropped once ``max_cache_retries`` is exceeded on failure.
+        """
+        if self.cache is None:
+            return None
+        prepared = self.cache.load(fid)
+        if prepared is None:
+            return None
+        persistent = self.cache.is_persistent(fid)
+        self.cache.bump_retry(fid)
+        resp = self._execute(prepared, from_cache_retry=True)
+        if persistent:
+            return resp
+        if resp.ok:
+            self.cache.remove(fid)
+        elif self.cache.retry_count(fid) >= self.cache.max_cache_retries:
+            self.logger.warning(f"Max retries exceeded for {fid}, dropping")
+            self.cache.remove(fid)
+        return resp
+
+    def remove_cached(self, fid: str) -> None:
+        """Explicitly delete a cached request (pending-retry or saved-for-reuse)."""
+        if self.cache is not None:
+            self.cache.remove(fid)
 
     # ------------------------------------------------------------------ cache retry loop
     def _arm_timer(self) -> None:
