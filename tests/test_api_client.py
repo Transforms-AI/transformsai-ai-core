@@ -243,105 +243,106 @@ def test_max_cache_retries_drops_request(cache_dir):
     client.shutdown()
 
 
-# --------------------------------------------------------------------------- persistent / reusable requests
-def test_persist_true_keeps_entry_on_success(cache_dir):
+# --------------------------------------------------------------------------- persistent (non-expiring) entries
+def test_persist_does_not_cache_on_success(cache_dir):
     client = make_client(cache_dir=cache_dir, max_retries=0)
     client._session.request = lambda *a, **k: FakeResp(200)
     resp = client.post("x", json={"a": 1}, persist=True)
     assert resp.ok
-    assert client.cache.pending == 1  # kept even though the send succeeded
+    assert client.cache.pending == 0  # persist changes expiry, not *when* we cache
+    client.shutdown()
+
+
+def test_persist_caches_on_failure_and_is_marked(cache_dir):
+    client = make_client(cache_dir=cache_dir, max_retries=0)
+    client._session.request = lambda *a, **k: FakeResp(503)
+    client.post("x", json={"a": 1}, persist=True)
     entries = client.list_cached()
     assert len(entries) == 1
     assert entries[0]["persistent"] is True
     client.shutdown()
 
 
-def test_persist_true_survives_max_cache_retries(cache_dir):
+def test_persist_retried_forever_past_max_cache_retries(cache_dir):
     client = make_client(cache_dir=cache_dir, max_retries=0, max_cache_retries=1)
     client._session.request = lambda *a, **k: FakeResp(503)
     client.post("x", json={"a": 1}, persist=True)
-    fid = client.list_cached()[0]["id"]
-    # timer-based auto-retry loop must never touch persistent entries
+    client.post("y", json={"a": 2})  # transient control: dropped once retries run out
     for _ in range(5):
         client._retry_pending()
-    assert client.cache.pending == 1
-    # manual resend keeps failing but the entry stays intact regardless
-    for _ in range(5):
-        client.resend_cached(fid)
-    assert client.cache.pending == 1
+    entries = client.list_cached()
+    assert len(entries) == 1
+    assert entries[0]["persistent"] is True
+    assert entries[0]["retry_count"] > 1  # kept getting retried
     client.shutdown()
 
 
-def test_persist_true_excluded_from_age_and_item_limits(cache_dir):
-    client = make_client(cache_dir=cache_dir, max_retries=0, max_cache_items=1, max_cache_age_seconds=0)
+def test_persist_removed_once_it_finally_succeeds(cache_dir):
+    client = make_client(cache_dir=cache_dir, max_retries=0)
     client._session.request = lambda *a, **k: FakeResp(503)
     client.post("x", json={"a": 1}, persist=True)
-    client.post("y", json={"a": 2})  # transient, would normally trigger the 1-item cap
-    assert client.cache.pending == 2  # persistent entry not counted against the cap
-    client.shutdown()
-
-
-def test_save_request_stores_without_sending(cache_dir):
-    client = make_client(cache_dir=cache_dir, max_retries=0)
-    calls = []
-    client._session.request = lambda *a, **k: calls.append(1) or FakeResp(200)
-    fid = client.save_request("POST", "x", json={"a": 1}, name="my-template")
-    assert fid is not None
-    assert len(calls) == 0  # nothing sent yet
     assert client.cache.pending == 1
-    entries = client.list_cached()
-    assert entries[0]["name"] == "my-template"
-    assert entries[0]["persistent"] is True
-    client.shutdown()
-
-
-def test_resend_cached_persistent_never_removed(cache_dir):
-    client = make_client(cache_dir=cache_dir, max_retries=0)
-    fid = client.save_request("POST", "x", json={"a": 1})
     client._session.request = lambda *a, **k: FakeResp(200)
-    resp = client.resend_cached(fid)
-    assert resp.ok
-    assert client.cache.pending == 1  # still there, reusable again
-    resp2 = client.resend_cached(fid)
-    assert resp2.ok
-    assert client.cache.pending == 1
+    client._retry_pending()
+    assert client.cache.pending == 0  # delivered, so it's done
     client.shutdown()
 
 
-def test_resend_cached_transient_removed_on_success(cache_dir):
-    client = make_client(cache_dir=cache_dir, max_retries=0)
+def test_persist_exempt_from_age_limit(cache_dir):
+    client = make_client(cache_dir=cache_dir, max_retries=0, max_cache_age_seconds=60)
     client._session.request = lambda *a, **k: FakeResp(503)
-    client.post("x", json={"a": 1})
-    fid = client.list_cached()[0]["id"]
-    client._session.request = lambda *a, **k: FakeResp(200)
-    resp = client.resend_cached(fid)
-    assert resp.ok
-    assert client.cache.pending == 0
+    client.post("x", json={"a": 1}, persist=True)
+    client.post("y", json={"a": 2})
+    client.cache._folder_epoch = lambda fid: 0.0  # pretend everything is ancient
+    assert len(client.cache.eligible()) == 1      # transient aged out, persistent survived
+    assert client.list_cached()[0]["persistent"] is True
     client.shutdown()
 
 
-def test_resend_cached_unknown_id_returns_none(cache_dir):
-    client = make_client(cache_dir=cache_dir)
-    assert client.resend_cached("nope") is None
+def test_item_cap_sacrifices_transient_before_persistent(cache_dir):
+    client = make_client(cache_dir=cache_dir, max_retries=0, max_cache_items=1)
+    client._session.request = lambda *a, **k: FakeResp(503)
+    client.post("x", json={"a": 1}, persist=True)  # oldest, but persistent
+    client.post("y", json={"a": 2})
+    entries = client.list_cached()
+    assert len(entries) == 1
+    assert entries[0]["persistent"] is True  # transient 'y' evicted instead
+    client.shutdown()
+
+
+def test_item_cap_still_bounds_persistent_entries(cache_dir):
+    client = make_client(cache_dir=cache_dir, max_retries=0, max_cache_items=2)
+    client._session.request = lambda *a, **k: FakeResp(503)
+    for i in range(5):
+        client.post(f"x{i}", json={"a": i}, persist=True)
+    assert client.cache.pending == 2  # cap is a disk backstop, applies to everyone
     client.shutdown()
 
 
 def test_remove_cached_deletes_persistent_entry(cache_dir):
-    client = make_client(cache_dir=cache_dir)
-    fid = client.save_request("POST", "x", json={"a": 1})
-    assert client.cache.pending == 1
-    client.remove_cached(fid)
+    client = make_client(cache_dir=cache_dir, max_retries=0)
+    client._session.request = lambda *a, **k: FakeResp(503)
+    client.post("x", json={"a": 1}, persist=True)
+    client.remove_cached(client.list_cached()[0]["id"])
     assert client.cache.pending == 0
     client.shutdown()
 
 
 def test_endpoint_profile_persist_true(cache_dir):
     client = make_client(cache_dir=cache_dir, max_retries=0)
-    client.register_endpoint("template", {"path": "t/", "persist": True})
-    client._session.request = lambda *a, **k: FakeResp(200)
-    client.send("template", json={"x": 1})
-    assert client.cache.pending == 1
+    client.register_endpoint("critical", {"path": "t/", "persist": True})
+    client._session.request = lambda *a, **k: FakeResp(503)
+    client.send("critical", json={"x": 1})
     assert client.list_cached()[0]["persistent"] is True
+    client.shutdown()
+
+
+def test_endpoint_profile_persist_overridden_per_call(cache_dir):
+    client = make_client(cache_dir=cache_dir, max_retries=0)
+    client.register_endpoint("critical", {"path": "t/", "persist": True})
+    client._session.request = lambda *a, **k: FakeResp(503)
+    client.send("critical", json={"x": 1}, persist=False)
+    assert client.list_cached()[0]["persistent"] is False
     client.shutdown()
 
 

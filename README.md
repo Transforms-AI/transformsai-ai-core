@@ -124,7 +124,8 @@ advanced:
     max_cache_items: 300
     max_cache_age_seconds: 86400
     max_cache_retries: 5
-    endpoints: {}               # freeform {name: path | profile-dict} — auto-registered by from_config
+    endpoints: {}               # freeform {name: path | {path, method, headers, content_type, cache, persist}}
+                                # auto-registered by from_config
     pool_connections: 10
     pool_maxsize: 10
     settings: {}                # freeform (e.g. jpeg_quality)
@@ -306,6 +307,31 @@ Manual ctor mirrors the `api:` YAML keys 1:1 — `base_url`, `headers`, `timeout
 `retry_on_status` (4xx fails fast), `max_workers`, the `cache_*` knobs, `endpoints`, `pool_*`.
 Failed writes are persisted atomically under `cache_dir/` and retried until success or limits;
 force with `cache=True`/`cache=False`.
+
+### Never-expiring entries (`persist=True`)
+
+The cache normally gives up eventually: a failed write is retried in the background until
+`max_cache_age_seconds` or `max_cache_retries` runs out, then it's dropped. `persist=True` changes
+**only that** — the entry never runs out. Same trigger (failures only, `cache=True/False` still decides
+*whether* to cache), same background retry, still removed the instant it succeeds; it just can't be aged
+out or given up on. Use it for requests that must not be silently lost.
+
+```python
+client.post("alerts", json={"alert": "unsafe"}, persist=True)   # retried until it lands
+```
+
+```yaml
+  api:
+    endpoints:
+      alert: "alerts/"            # string form → normal expiry
+      critical:                   # profile dict
+        path: "critical/"
+        persist: true             # per-call persist=False still overrides this
+```
+
+`max_cache_items` continues to apply as a disk backstop (transient entries are evicted first, persistent
+ones only if the cap is still exceeded). `list_cached()` shows everything pending with its `persistent`
+flag; `remove_cached(fid)` is the only way to discard one by hand.
 
 ### DataUploader (legacy)
 

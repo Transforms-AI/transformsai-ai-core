@@ -90,12 +90,11 @@ class _DirCache:
     global manifest rewrite). The in-memory state is only the list of folder
     ids; request bytes are read lazily at retry time to keep memory flat.
 
-    Entries added with ``persistent=True`` are reusable saved requests rather
-    than transient failure retries: they are exempt from age/item-count/
-    retry-count eviction, excluded from the automatic background retry loop,
-    and never removed on success. They stay on disk completely intact until
-    an explicit ``remove()`` call — the point being that they can be reused
-    (via ``ApiClient.resend_cached``) any number of times, whenever needed.
+    Entries added with ``persistent=True`` behave exactly like normal cached
+    failures — retried by the background loop, removed on success — except
+    that they never expire: neither ``max_cache_age_seconds`` nor
+    ``max_cache_retries`` can drop them. Only ``max_cache_items`` still
+    applies, as a disk-safety backstop.
     """
 
     SCHEMA = 1
@@ -170,9 +169,8 @@ class _DirCache:
     def add(self, prepared: dict, persistent: bool = False) -> Optional[str]:
         """Persist a request to a new folder. Returns the folder id (or None if not cached).
 
-        ``persistent=True`` marks this as a saved, reusable request: it is kept
-        completely intact on disk (no age/count/retry-count eviction, never
-        auto-removed on success) until explicitly deleted.
+        ``persistent=True`` marks the entry as non-expiring: it is retried like
+        any other, but age and retry-count limits never drop it.
         """
         with self._lock:
             created = time.time()
@@ -296,7 +294,7 @@ class _DirCache:
         return int(meta.get("retry_count", 0)) if meta else self.max_cache_retries
 
     def is_persistent(self, fid: str) -> bool:
-        """Saved-for-reuse entries are exempt from every automatic eviction path."""
+        """Non-expiring entries ignore the age and retry-count limits."""
         meta = self._read_meta(fid)
         return bool(meta.get("persistent", False)) if meta else False
 
@@ -313,28 +311,17 @@ class _DirCache:
                 self.logger.warning(f"Failed to persist retry_count for {fid}: {e}")
 
     def eligible(self) -> List[str]:
-        """Non-persistent folder ids still within age and retry-count limits.
-
-        Persistent (saved-for-reuse) entries are deliberately excluded: they
-        are only ever sent via an explicit ``ApiClient.resend_cached`` call,
-        never by the automatic background retry loop.
-        """
+        """Folder ids still worth retrying — persistent ones always are."""
         with self._lock:
             self._enforce_limits()
             out = []
             for fid in list(self._ids):
-                if self.is_persistent(fid):
-                    continue
-                if self.retry_count(fid) < self.max_cache_retries:
+                if self.is_persistent(fid) or self.retry_count(fid) < self.max_cache_retries:
                     out.append(fid)
             return out
 
     def list(self) -> List[dict]:
-        """Lightweight metadata for every cached request (no file bytes read).
-
-        Powers the first-class reuse API: inspect what's saved, then act on
-        an id via ``ApiClient.resend_cached`` / ``remove_cached``.
-        """
+        """Lightweight metadata for every cached request (no file bytes read)."""
         with self._lock:
             out = []
             for fid in self._ids:
@@ -364,7 +351,9 @@ class _DirCache:
     def _enforce_limits(self) -> None:
         """Caller must hold the lock. Drop aged-out (any number) then excess (oldest-first).
 
-        Persistent entries never participate in either check.
+        Persistent entries skip the age check but still count against
+        ``max_cache_items`` — that cap is a disk-safety backstop, not an expiry
+        policy — though transient entries are always sacrificed first.
         """
         if self.max_cache_age_seconds > 0:
             now = time.time()
@@ -373,10 +362,11 @@ class _DirCache:
                 if created is not None and now - created > self.max_cache_age_seconds:
                     self.logger.debug(f"Dropping aged-out cached request {fid}")
                     self._remove_nolock(fid)
-        transient = [f for f in self._ids if not self.is_persistent(f)]  # _ids sorted -> oldest first
-        if self.max_cache_items > 0 and len(transient) > self.max_cache_items:
-            excess = len(transient) - self.max_cache_items
-            for fid in transient[:excess]:
+        if self.max_cache_items > 0 and len(self._ids) > self.max_cache_items:
+            excess = len(self._ids) - self.max_cache_items
+            persistent = [f for f in self._ids if self.is_persistent(f)]
+            victims = [f for f in self._ids if f not in persistent] + persistent  # _ids sorted -> oldest first
+            for fid in victims[:excess]:
                 self.logger.debug(f"Dropping excess cached request {fid}")
                 self._remove_nolock(fid)
 
@@ -682,12 +672,8 @@ class ApiClient:
 
     def _send_and_maybe_cache(self, prepared: dict, cache: Optional[bool], persist: bool = False) -> Response:
         resp = self._execute(prepared)
-        if self.cache is not None:
-            if persist:
-                # keep a permanent, reusable copy regardless of outcome
-                self.cache.add(prepared, persistent=True)
-            elif not resp.ok and self._should_cache(prepared["method"], cache):
-                self.cache.add(prepared)
+        if self.cache is not None and not resp.ok and self._should_cache(prepared["method"], cache):
+            self.cache.add(prepared, persistent=persist)
         return resp
 
     def _done_callback(self, future: Future) -> None:
@@ -708,11 +694,10 @@ class ApiClient:
         ``async_=False`` (default) blocks through retries and returns a ``Response``;
         ``async_=True`` submits to the executor and returns a ``Future[Response]``.
 
-        ``persist=True`` saves a permanent, reusable copy of this request to the
-        cache regardless of success/failure — exempt from age/item-count/
-        retry-count eviction, never auto-removed. Reuse it later with
-        ``resend_cached(fid)`` (the id is in ``list_cached()``); delete with
-        ``remove_cached(fid)``.
+        ``persist=True`` changes nothing about *when* this request is cached —
+        only failures are cached, same as always — but the resulting entry never
+        expires: it is retried until it succeeds, ignoring ``max_cache_age_seconds``
+        and ``max_cache_retries``. Use it for requests that must not be dropped.
         """
         prepared = self._prepare(method, path, json, data, params, files, headers,
                                  base_url, content_type, name)
@@ -783,28 +768,9 @@ class ApiClient:
             async_=async_, name=name,
         )
 
-    # ------------------------------------------------------------------ reusable requests (first-class)
-    def save_request(self, method: str, path: str = "", *, json: Any = None, data: Any = None,
-                      params: Optional[Dict] = None, files: Optional[Dict] = None,
-                      headers: Optional[Dict] = None, content_type: Optional[str] = None,
-                      base_url: Optional[str] = None, name: Optional[str] = None) -> Optional[str]:
-        """Build and persist a request to disk for later reuse, without sending it now.
-
-        Returns the cache id (or ``None`` if caching is disabled / the save
-        failed). The saved request is kept completely intact — exempt from
-        age/item-count/retry-count eviction — until you explicitly send it
-        with ``resend_cached(fid)`` and/or delete it with ``remove_cached(fid)``.
-        """
-        if self.cache is None:
-            self.logger.warning("Cache is disabled; cannot save a request for reuse")
-            return None
-        prepared = self._prepare(method, path, json, data, params, files, headers,
-                                 base_url, content_type, name)
-        prepared["timeout"] = self.timeout
-        return self.cache.add(prepared, persistent=True)
-
+    # ------------------------------------------------------------------ cache introspection
     def list_cached(self) -> List[dict]:
-        """List every cached request (pending failure-retries and saved-for-reuse), newest last.
+        """List every pending cached request, newest last.
 
         Each entry: ``id``, ``name``, ``method``, ``url``, ``persistent``,
         ``retry_count``, ``created_at``.
@@ -813,33 +779,8 @@ class ApiClient:
             return []
         return self.cache.list()
 
-    def resend_cached(self, fid: str) -> Optional[Response]:
-        """Explicitly (re)send a cached request by id. Returns ``None`` if it doesn't exist.
-
-        Persistent (saved-for-reuse) entries are never removed by this call,
-        regardless of outcome, so they can be resent again later. Transient
-        (auto-cached failure) entries follow the usual policy: removed on
-        success, dropped once ``max_cache_retries`` is exceeded on failure.
-        """
-        if self.cache is None:
-            return None
-        prepared = self.cache.load(fid)
-        if prepared is None:
-            return None
-        persistent = self.cache.is_persistent(fid)
-        self.cache.bump_retry(fid)
-        resp = self._execute(prepared, from_cache_retry=True)
-        if persistent:
-            return resp
-        if resp.ok:
-            self.cache.remove(fid)
-        elif self.cache.retry_count(fid) >= self.cache.max_cache_retries:
-            self.logger.warning(f"Max retries exceeded for {fid}, dropping")
-            self.cache.remove(fid)
-        return resp
-
     def remove_cached(self, fid: str) -> None:
-        """Explicitly delete a cached request (pending-retry or saved-for-reuse)."""
+        """Explicitly drop a cached request — the only way to discard a persistent one."""
         if self.cache is not None:
             self.cache.remove(fid)
 
@@ -862,7 +803,11 @@ class ApiClient:
             self._arm_timer()
 
     def _retry_pending(self) -> None:
-        """Retry every eligible cached request once; remove on success or when max retries hit."""
+        """Retry every eligible cached request once; remove on success or when max retries hit.
+
+        Persistent entries are retried forever — only success (or an explicit
+        ``remove_cached``) takes them off disk.
+        """
         if self.cache is None:
             return
         eligible = self.cache.eligible()
@@ -881,7 +826,8 @@ class ApiClient:
             if resp.ok:
                 self.logger.info(f"Cache retry succeeded: {fid}")
                 self.cache.remove(fid)
-            elif self.cache.retry_count(fid) >= self.cache.max_cache_retries:
+            elif (not self.cache.is_persistent(fid)
+                  and self.cache.retry_count(fid) >= self.cache.max_cache_retries):
                 self.logger.warning(f"Max retries exceeded for {fid}, dropping")
                 self.cache.remove(fid)
 

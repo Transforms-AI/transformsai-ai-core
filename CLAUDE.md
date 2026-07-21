@@ -67,7 +67,7 @@ All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses
 - `register_endpoint(name, profile)` (string or dict) + `send(name, ...)`; precedence per-call arg > profile > client default
 - Returns a frozen `Response` (`status_code/text/.json()/ok/attempts/...`); total failure → `Response(status_code=0, ok=False)`, never raises
 - Directory-per-request cache (`cache_dir/`, one folder per pending request — atomic, corruption-tolerant, O(1)); auto-retry policy: caches failed writes only, never GET/HEAD/OPTIONS
-- Reusable requests are first-class: `persist=True` (on `request`/`send`/verb methods, or an endpoint profile's `persist` key) keeps a cache entry completely intact on disk regardless of outcome — exempt from age/item-count/retry-count eviction and never auto-removed. `save_request(...)` builds and persists a request without sending it. `list_cached()` / `resend_cached(fid)` / `remove_cached(fid)` inspect, replay, and delete cached requests (persistent or transient) on demand — persistent entries are excluded from the automatic background retry loop and can be resent any number of times
+- `persist=True` (on `request`/`send`/verb methods, or an endpoint profile's `persist` key) marks a cache entry **non-expiring**: cached and retried exactly like any other failed write, and removed on success, but immune to `max_cache_age_seconds` and `max_cache_retries`. `max_cache_items` still applies (transient entries evicted first). `list_cached()` / `remove_cached(fid)` inspect and hand-drop cached requests
 
 **`datasend.py`** — `DataUploader` async HTTP client (**legacy**, still available; `ApiClient` supersedes it).
 - Non-blocking by default; thread pool auto-tuned to `min(2, cpu_count)`
