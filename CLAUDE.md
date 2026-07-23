@@ -59,6 +59,24 @@ All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses
 - Auto-detects source (USB index, RTSP URL, local file)
 - Key params: `auto_restart_on_fail`, `restart_delay`, `max_frame_age_ms`, `hw_decode`
 - Usage: `.start()` → `.read()` in loop → `.stop()`
+- **Supervised reconnect, on by default** (`auto_restart_on_fail=True`). Failed open, a
+  30-read failure streak, a stall, or an exception all funnel through one backoff policy:
+  `restart_delay` is the **ceiling**, `restart_backoff_start` (1.0) the first delay,
+  doubling with ±`restart_backoff_jitter`, reset after `restart_reset_after` healthy
+  seconds. `max_restart_attempts=None` retries forever
+- Stall watchdog: no decoded frame within `stall_timeout` (default `max(5, 20/fps)`, live
+  sources only) forces a reconnect. `max_frame_age_ms` is consumer-side only and does *not*
+  trigger one
+- Network opens set `OPENCV_FFMPEG_CAPTURE_OPTIONS` (`timeout`/`stimeout` from
+  `open_timeout`, plus `rtsp_transport` for `rtsp://` only) under a class lock, so a dead
+  link can't block `grab()` indefinitely. `ffmpeg_options` overrides the string verbatim
+- The capture thread **owns the handle** and always releases it; `release()` abandons a
+  thread wedged in OpenCV instead of double-releasing (the old code could segfault here)
+- Health: `.state`, `.is_healthy`, `.get_stats()`, `on_state_change(state, stats)` callback,
+  plus a `health_log_interval` line (DEBUG when healthy, INFO when degraded)
+- `read()` blocks up to `timeout` while down (no busy-spin), returns instantly after `stop()`
+- Config: nested `capture.restart:` block; legacy flat `auto_restart_on_fail`/`restart_delay`
+  still honored. Precedence: **overrides > `restart.*` > legacy flat > constructor defaults**
 
 **`api_client.py`** — `ApiClient` generic, pooled HTTP client (the v4 client; prefer for new code).
 - `Response`/`EndpointProfile`/`ApiClient`; backed by one pooled `requests.Session` (keep-alive, `max_retries=0` so urllib3 doesn't double-retry)
@@ -116,11 +134,24 @@ cameras:
       width: null
       height: null
       driver: null
-      auto_restart_on_fail: false
-      restart_delay: 30.0
       auto_resize: true
       hw_decode: false
       fps: null
+      open_timeout: 5.0
+      rtsp_transport: tcp     # 'tcp'|'udp'|null — rtsp:// sources only
+      ffmpeg_options: null
+      health_log_interval: 60.0
+      restart:
+        enabled: null         # null → legacy auto_restart_on_fail → true
+        delay: null           # backoff ceiling; null → legacy restart_delay → 30.0
+        backoff_start: 1.0
+        backoff_jitter: 0.2
+        reset_after: 30.0
+        max_attempts: null    # null = forever
+        stall_timeout: null   # null = auto max(5, 20/fps); 0 = off
+        extras: {}
+      auto_restart_on_fail: null  # LEGACY → restart.enabled
+      restart_delay: null         # LEGACY → restart.delay
       extras: {}
     settings: {}        # freeform per-camera
     extras: {}

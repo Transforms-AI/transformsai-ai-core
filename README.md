@@ -78,11 +78,24 @@ cameras:
       width: null
       height: null
       driver: null
-      auto_restart_on_fail: false
-      restart_delay: 30.0
       auto_resize: true
       hw_decode: false
       fps: null
+      open_timeout: 5.0         # network open/read timeout (applied via FFmpeg)
+      rtsp_transport: tcp       # 'tcp'|'udp'|null (rtsp:// only; null = FFmpeg negotiates)
+      ffmpeg_options: null      # verbatim OPENCV_FFMPEG_CAPTURE_OPTIONS override
+      health_log_interval: 60.0 # periodic health line (0 = off)
+      restart:                  # reconnect policy
+        enabled: null           # null → legacy auto_restart_on_fail → true
+        delay: null             # backoff CEILING; null → legacy restart_delay → 30.0
+        backoff_start: 1.0      # first retry delay; doubles up to `delay`
+        backoff_jitter: 0.2     # ±fraction, keeps multi-camera reconnects out of lockstep
+        reset_after: 30.0       # healthy seconds before the ramp resets
+        max_attempts: null      # null = retry forever
+        stall_timeout: null     # null = auto max(5, 20/fps); 0 = off
+        extras: {}
+      auto_restart_on_fail: null  # LEGACY → restart.enabled
+      restart_delay: null         # LEGACY → restart.delay
       extras: {}
     settings: {}                # freeform per-camera → config["cameras"][n]["settings"]
     extras: {}
@@ -206,7 +219,9 @@ View a file: `cat run_*.jsonl | logdy` (https://logdy.dev).
 
 ## Video Capture
 
-Auto-detects source type (device index / RTSP URL / file path).
+Auto-detects source type (device index / RTSP URL / file path). Reconnect is supervised
+and **on by default** — a failed open, a run of failed reads, a stalled stream or an
+unexpected exception all reconnect on a jittered exponential backoff.
 
 ```python
 from transformsai_ai_core import VideoCaptureAsync
@@ -220,15 +235,43 @@ cap = VideoCaptureAsync(
     buffer_size=1,                # OpenCV buffer; 1 = minimal lag
     hw_decode=False,
     fps=None,
-    auto_restart_on_fail=False, restart_delay=30.0,
     opencv_backend="auto",        # "auto" | "ffmpeg" | "gstreamer"
     max_frame_age_ms=None,        # drop stale frames
     auto_resize=True,
+    # --- reconnect policy ---
+    auto_restart_on_fail=True,    # False = raise on a bad source, die on failure (legacy)
+    restart_delay=30.0,           # backoff CEILING
+    restart_backoff_start=1.0,    # first retry; doubles 1 → 2 → 4 … → restart_delay
+    restart_backoff_jitter=0.2,
+    restart_reset_after=30.0,     # healthy seconds before the ramp resets
+    max_restart_attempts=None,    # None = forever
+    stall_timeout=None,           # None = auto max(5, 20/fps); no frame for this long → reconnect
+    open_timeout=5.0,             # bounds a blocking open/grab on a dead network
+    rtsp_transport="tcp",         # rtsp:// only; None = let FFmpeg negotiate
+    health_log_interval=60.0,
+    on_state_change=None,         # fn(state, stats) on every transition
 ).start(loop=False)               # loop=True repeats video files
 
-grabbed, frame = cap.read(wait_for_frame=False, timeout=1.0, copy=True)  # copy=False = live ref, don't mutate
+grabbed, frame = cap.read(wait_for_new_frame=True, timeout=1.0, copy=True)  # copy=False = live ref, don't mutate
 cap.stop(); cap.release()
 ```
+
+### Health
+
+```python
+cap.state        # idle | connecting | streaming | reconnecting | failed | stopped
+cap.is_healthy   # streaming AND a frame arrived within the stall window
+cap.get_stats()  # restart_count, current_backoff, last_error, uptime_seconds,
+                 # measured_fps, total_frames, frames_dropped_stale, orphaned_threads, …
+```
+
+While the source is down, `read()` blocks up to `timeout` and returns `(False, None)` —
+it never busy-spins. After `stop()`/`release()` it returns immediately.
+
+`release()` waits `max(2, open_timeout + 1)`s for the capture thread; if OpenCV is wedged
+in a blocking call the thread is abandoned (it releases its own handle when the call
+returns) rather than releasing a handle another thread is still inside. Such an instance
+is terminal — `start()` on it raises; build a new `VideoCaptureAsync`.
 
 ---
 

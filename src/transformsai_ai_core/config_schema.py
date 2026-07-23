@@ -35,6 +35,26 @@ class RtspSource(BaseModel):
     extras: dict[str, Any] = Field(default_factory=dict, description="Sanctioned freeform channel for unmodeled fields")
 
 
+class RestartSettings(BaseModel):
+    """
+    Reconnect policy for VideoCaptureAsync.
+
+    `enabled` and `delay` default to None so an absent block never outranks the legacy
+    flat `capture.auto_restart_on_fail` / `capture.restart_delay` keys — Pydantic
+    materializes nested defaults on model_dump(), so a concrete default here would
+    silently win. VideoCaptureAsync.__init__ holds the real defaults.
+    """
+
+    enabled: bool | None = Field(default=None, description="Auto-restart on failure (default: true; falls back to capture.auto_restart_on_fail)")
+    delay: float | None = Field(default=None, description="Backoff ceiling in seconds (default: 30.0; falls back to capture.restart_delay)")
+    backoff_start: float = Field(default=1.0, description="First reconnect delay in seconds; doubles up to `delay`")
+    backoff_jitter: float = Field(default=0.2, description="Jitter fraction applied to each backoff delay (0 = off)")
+    reset_after: float = Field(default=30.0, description="Seconds of healthy streaming before the backoff ramp resets")
+    max_attempts: int | None = Field(default=None, description="Consecutive reconnect attempts before giving up (null = forever)")
+    stall_timeout: float | None = Field(default=None, description="Seconds without a new frame before forcing a reconnect (null = auto max(5, 20/fps), 0 = off)")
+    extras: dict[str, Any] = Field(default_factory=dict, description="Sanctioned freeform channel for unmodeled fields")
+
+
 class CaptureSettings(BaseModel):
     """Video capture optimization settings."""
 
@@ -44,11 +64,16 @@ class CaptureSettings(BaseModel):
     width: int | None = Field(default=None, description="Capture width (None = native)")
     height: int | None = Field(default=None, description="Capture height (None = native)")
     driver: str | None = Field(default=None, description="Optional driver hint")
-    auto_restart_on_fail: bool = Field(default=False, description="Auto-restart capture on failure")
-    restart_delay: float = Field(default=30.0, description="Delay in seconds before restart attempt")
+    auto_restart_on_fail: bool | None = Field(default=None, description="LEGACY: use restart.enabled (default: true)")
+    restart_delay: float | None = Field(default=None, description="LEGACY: use restart.delay (default: 30.0)")
     auto_resize: bool = Field(default=True, description="Auto-resize if dimensions don't match")
     hw_decode: bool = Field(default=False, description="Enable hardware-accelerated decoding")
     fps: int | None = Field(default=None, description="Target frames per second (None = native)")
+    open_timeout: float = Field(default=5.0, description="Network open/read timeout in seconds (applied via FFmpeg)")
+    rtsp_transport: str | None = Field(default="tcp", description="RTSP transport: 'tcp', 'udp', or null to let FFmpeg negotiate")
+    ffmpeg_options: str | None = Field(default=None, description="Verbatim OPENCV_FFMPEG_CAPTURE_OPTIONS override")
+    health_log_interval: float = Field(default=60.0, description="Seconds between periodic capture health log lines (0 = off)")
+    restart: RestartSettings = Field(default_factory=RestartSettings, description="Reconnect policy")
     extras: dict[str, Any] = Field(default_factory=dict, description="Sanctioned freeform channel for unmodeled fields")
 
 

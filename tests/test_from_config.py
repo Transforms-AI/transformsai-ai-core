@@ -171,6 +171,102 @@ assert cap_ov.buffer_size == 99
 print("✓ VideoCaptureAsync overrides beat config")
 
 
+print_test_header("7b", "VideoCaptureAsync.from_config flattens the nested restart block")
+restart_cfg = {
+    "local": True,
+    "local_source": "tests/demo/sample.mp4",
+    "capture": {
+        "buffer_size": 1,
+        "restart": {
+            "enabled": True,
+            "delay": 12.5,
+            "backoff_start": 0.5,
+            "backoff_jitter": 0.0,
+            "reset_after": 10.0,
+            "max_attempts": 4,
+            "stall_timeout": 7.5,
+        },
+    },
+}
+cap_restart = VideoCaptureAsync.from_config(restart_cfg)
+assert cap_restart.auto_restart_on_fail is True
+assert cap_restart.restart_delay == 12.5
+assert cap_restart.restart_backoff_start == 0.5
+assert cap_restart.restart_backoff_jitter == 0.0
+assert cap_restart.restart_reset_after == 10.0
+assert cap_restart.max_restart_attempts == 4
+assert cap_restart.stall_timeout == 7.5
+assert cap_restart.get_stats()["stall_timeout"] == 7.5
+print("✓ capture.restart.* flattened onto the constructor")
+
+
+print_test_header("7c", "capture.restart wins over legacy flat keys; legacy still honored alone")
+# Nested block present -> it wins
+mixed_cfg = {
+    "local": True,
+    "local_source": "tests/demo/sample.mp4",
+    "capture": {
+        "auto_restart_on_fail": False,
+        "restart_delay": 99.0,
+        "restart": {"enabled": True, "delay": 5.0},
+    },
+}
+cap_mixed = VideoCaptureAsync.from_config(mixed_cfg)
+assert cap_mixed.auto_restart_on_fail is True
+assert cap_mixed.restart_delay == 5.0
+
+# Nested block absent/defaulted (all None) -> legacy flat keys still apply
+legacy_cfg = {
+    "local": True,
+    "local_source": "tests/demo/sample.mp4",
+    "capture": {
+        "auto_restart_on_fail": True,
+        "restart_delay": 42.0,
+        "restart": {"enabled": None, "delay": None, "backoff_start": 1.0},
+    },
+}
+cap_legacy = VideoCaptureAsync.from_config(legacy_cfg)
+assert cap_legacy.auto_restart_on_fail is True
+assert cap_legacy.restart_delay == 42.0
+
+# A full CaptureSettings model (Pydantic materializes restart with None defaults,
+# which must not clobber the legacy flat keys the user actually wrote)
+cap_model_legacy = VideoCaptureAsync.from_config(
+    CameraConfig(
+        local=True,
+        local_source="tests/demo/sample.mp4",
+        capture=CaptureSettings(auto_restart_on_fail=True, restart_delay=17.0),
+    )
+)
+assert cap_model_legacy.auto_restart_on_fail is True
+assert cap_model_legacy.restart_delay == 17.0
+
+# Legacy opt-out reaches the constructor: restart off + unopenable source still raises
+try:
+    VideoCaptureAsync.from_config(
+        CameraConfig(
+            local=True,
+            local_source="tests/demo/sample.mp4",
+            capture=CaptureSettings(auto_restart_on_fail=False),
+        )
+    )
+    raise AssertionError("auto_restart_on_fail=False should raise on an unopenable source")
+except RuntimeError:
+    pass
+print("✓ restart precedence: overrides > restart.* > legacy flat > defaults")
+
+
+print_test_header("7d", "VideoCaptureAsync defaults are robust out of the box")
+cap_default = VideoCaptureAsync.from_config({"local": True, "local_source": "tests/demo/sample.mp4"})
+assert cap_default.auto_restart_on_fail is True
+assert cap_default.restart_delay == 30.0
+assert cap_default.restart_backoff_start == 1.0
+assert cap_default.max_restart_attempts is None
+assert cap_default.state == "idle"
+assert cap_default.is_healthy is False
+print("✓ restart-on by default, backoff ramp 1.0 → 30.0, retries forever")
+
+
 # =============================================================================
 # SECTION 3: MediaMTXStreamer.from_config
 # =============================================================================
@@ -394,6 +490,7 @@ print("="*70)
 print("\nfrom_config Validated:")
 print("  ✓ ApiClient.from_config (model, dict, process_config output, overrides, extras)")
 print("  ✓ VideoCaptureAsync.from_config (local, RTSP, pre-built URL, CameraConfig model)")
+print("  ✓ VideoCaptureAsync restart policy (nested block, legacy flat keys, precedence)")
 print("  ✓ MediaMTXStreamer.from_config (full config, defaults, encoder flattening)")
 print("  ✓ init_kwargs filtering")
 print("  ✓ extras round-trip survival + forwarding")
