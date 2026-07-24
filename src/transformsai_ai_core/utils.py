@@ -106,7 +106,8 @@ def hide_camera_timestamp_and_add_current_time(
     new_ts_font_thickness=1,
     new_ts_padding_ratio=0.1,
     timestamp=None,
-    inplace=False
+    inplace=False,
+    time_format="%Y-%m-%d %H:%M:%S"
 ):
     """
     Hides a region on a frame (defined by pixel coordinates or ratios)
@@ -131,6 +132,8 @@ def hide_camera_timestamp_and_add_current_time(
         timestamp (float, optional): Unix timestamp to display. Uses current time if None.
         inplace (bool, optional): If True, modify frame in-place (saves ~6MB for 1080p).
                                   Default: False (backward compatible).
+        time_format (str, optional): strftime format for the rendered timestamp.
+                                     Default: "%Y-%m-%d %H:%M:%S".
 
     Returns:
         np.ndarray: The modified frame.
@@ -161,7 +164,7 @@ def hide_camera_timestamp_and_add_current_time(
     # 3. Get current time and format it
     current_unix_time = time.time() if timestamp is None else timestamp
     dt_object = datetime.datetime.fromtimestamp(current_unix_time)
-    time_string = dt_object.strftime("%Y-%m-%d %H:%M:%S")
+    time_string = dt_object.strftime(time_format)
 
     # 4. Determine font scale for the new timestamp
     if new_ts_font_scale is None:

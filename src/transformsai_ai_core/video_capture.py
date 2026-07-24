@@ -85,6 +85,16 @@ class VideoCaptureAsync:
         "stall_timeout": "stall_timeout",
     }
 
+    # capture.timestamp.<key> -> hide_camera_timestamp_and_add_current_time kwarg
+    _TIMESTAMP_KEY_MAP = {
+        "rect_ratios": "camera_ts_rect_ratios",
+        "rect_coords": "camera_ts_rect_coords",
+        "hide_color": "hide_rect_color",
+        "font_color": "new_ts_font_color",
+        "font_scale": "new_ts_font_scale",
+        "time_format": "time_format",
+    }
+
     def __init__(
         self,
         src=0,
@@ -109,6 +119,8 @@ class VideoCaptureAsync:
         ffmpeg_options=None,
         health_log_interval=60.0,
         on_state_change=None,
+        timestamp_overlay=False,
+        timestamp_overlay_options=None,
     ):
         # Cast string integers to actual ints for proper USB detection
         self.src = int(src) if isinstance(src, str) and src.isdigit() else src
@@ -145,6 +157,14 @@ class VideoCaptureAsync:
         self.health_log_interval = health_log_interval
         self.on_state_change = on_state_change
         self._backoff = _Backoff(restart_backoff_start, restart_delay, restart_backoff_jitter)
+
+        # Optional OSD timestamp-overwrite overlay (applied once, in the capture thread).
+        # Drop None-valued options so the util's own defaults apply for anything unset.
+        self._timestamp_overlay = bool(timestamp_overlay)
+        self._ts_overlay_options = {
+            k: v for k, v in (timestamp_overlay_options or {}).items() if v is not None
+        }
+        self._ts_overlay_failures = 0
 
         # State variables
         self.cap = None
@@ -491,7 +511,33 @@ class VideoCaptureAsync:
 
         return self._schedule_retry()
 
+    def _apply_timestamp_overlay(self, frame):
+        """
+        Paint the current system time over the camera's OSD timestamp region.
+
+        Runs in the capture thread on the freshly-decoded buffer (inplace, allocation-free)
+        so every consumer inherits the corrected time from one overlay. Fail-open: a bad
+        options dict must not raise into the capture loop (that would trigger a spurious
+        reconnect), so errors are logged at most once and the original frame is published.
+        """
+        try:
+            from .utils import hide_camera_timestamp_and_add_current_time
+            return hide_camera_timestamp_and_add_current_time(
+                frame, timestamp=None, inplace=True, **self._ts_overlay_options
+            )
+        except Exception as e:
+            self._ts_overlay_failures += 1
+            if self._ts_overlay_failures == 1:
+                self.logger.error(
+                    f"[{self.src}] timestamp overlay failed ({e}); publishing un-stamped "
+                    "frames (this is logged once)"
+                )
+            return frame
+
     def _publish_frame(self, frame):
+        if self._timestamp_overlay and frame is not None:
+            frame = self._apply_timestamp_overlay(frame)
+
         now = time.monotonic()
         self._last_new_frame_mono = now
         self._total_frames += 1
@@ -790,6 +836,23 @@ class VideoCaptureAsync:
                 restart_kwargs[cls._RESTART_KEY_MAP[key]] = value
         restart_kwargs.update(restart_cfg.get("extras", {}) or {})
 
-        kwargs: dict = {"src": src, **capture_cfg, **restart_kwargs}
+        # Optional timestamp-overwrite overlay: flatten the nested block into the
+        # timestamp_overlay flag + a mapped options dict passed to the util.
+        timestamp_cfg = capture_cfg.pop("timestamp", None) or {}
+        if hasattr(timestamp_cfg, "model_dump"):
+            timestamp_cfg = timestamp_cfg.model_dump()
+        timestamp_kwargs = {}
+        if timestamp_cfg:
+            ts_options = {}
+            for key, value in timestamp_cfg.items():
+                if key in cls._TIMESTAMP_KEY_MAP and value is not None:
+                    ts_options[cls._TIMESTAMP_KEY_MAP[key]] = value
+            ts_options.update(timestamp_cfg.get("extras", {}) or {})
+            timestamp_kwargs = {
+                "timestamp_overlay": bool(timestamp_cfg.get("enabled", False)),
+                "timestamp_overlay_options": ts_options,
+            }
+
+        kwargs: dict = {"src": src, **capture_cfg, **restart_kwargs, **timestamp_kwargs}
         kwargs = {**cfg.get("extras", {}), **kwargs, **overrides}
         return cls(**init_kwargs(cls, kwargs))

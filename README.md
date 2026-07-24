@@ -94,6 +94,15 @@ cameras:
         max_attempts: null      # null = retry forever
         stall_timeout: null     # null = auto max(5, 20/fps); 0 = off
         extras: {}
+      timestamp:                # overwrite the camera OSD timestamp with current system time
+        enabled: false          # off by default; stamps every published frame when true
+        rect_ratios: null       # (x,y,w,h) hide-rect as frame ratios; null = top-left OSD default
+        rect_coords: null       # (x,y,w,h) in pixels; overrides rect_ratios
+        hide_color: null        # BGR of hide rectangle; null = white
+        font_color: null        # BGR of timestamp text; null = black
+        font_scale: null        # null = auto from rect height
+        time_format: null       # strftime; null = '%Y-%m-%d %H:%M:%S'
+        extras: {}
       auto_restart_on_fail: null  # LEGACY → restart.enabled
       restart_delay: null         # LEGACY → restart.delay
       extras: {}
@@ -250,6 +259,9 @@ cap = VideoCaptureAsync(
     rtsp_transport="tcp",         # rtsp:// only; None = let FFmpeg negotiate
     health_log_interval=60.0,
     on_state_change=None,         # fn(state, stats) on every transition
+    # --- OSD timestamp overwrite (Hikvision clocks are often wrong) ---
+    timestamp_overlay=False,      # True = stamp current system time over the camera OSD on every frame
+    timestamp_overlay_options=None,  # dict passed to utils.hide_camera_timestamp_and_add_current_time
 ).start(loop=False)               # loop=True repeats video files
 
 grabbed, frame = cap.read(wait_for_new_frame=True, timeout=1.0, copy=True)  # copy=False = live ref, don't mutate

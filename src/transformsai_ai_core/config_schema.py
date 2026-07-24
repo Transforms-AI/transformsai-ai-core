@@ -55,6 +55,27 @@ class RestartSettings(BaseModel):
     extras: dict[str, Any] = Field(default_factory=dict, description="Sanctioned freeform channel for unmodeled fields")
 
 
+class TimestampSettings(BaseModel):
+    """
+    Optional timestamp-overwrite overlay for VideoCaptureAsync.
+
+    Hikvision (and similar) cameras burn an on-screen timestamp into the video whose clock
+    is often wrong. When `enabled`, the capture thread paints over that OSD region and draws
+    the current system time onto every published frame, so all downstream consumers
+    (livestream, upload, inference) inherit the corrected time. Region/appearance fields
+    default to None so the underlying util's own defaults apply (top-left OSD strip).
+    """
+
+    enabled: bool = Field(default=False, description="Overwrite the camera OSD timestamp with current system time")
+    rect_ratios: list[float] | None = Field(default=None, description="(x, y, w, h) hide-rectangle as frame ratios (0-1); null = util default")
+    rect_coords: list[int] | None = Field(default=None, description="(x, y, w, h) hide-rectangle in pixels; overrides rect_ratios")
+    hide_color: list[int] | None = Field(default=None, description="BGR fill color of the hide rectangle; null = util default (white)")
+    font_color: list[int] | None = Field(default=None, description="BGR color of the drawn timestamp text; null = util default (black)")
+    font_scale: float | None = Field(default=None, description="Font scale for the drawn timestamp; null = auto from rect height")
+    time_format: str | None = Field(default=None, description="strftime format for the timestamp; null = util default '%Y-%m-%d %H:%M:%S'")
+    extras: dict[str, Any] = Field(default_factory=dict, description="Sanctioned freeform channel for unmodeled fields")
+
+
 class CaptureSettings(BaseModel):
     """Video capture optimization settings."""
 
@@ -74,6 +95,7 @@ class CaptureSettings(BaseModel):
     ffmpeg_options: str | None = Field(default=None, description="Verbatim OPENCV_FFMPEG_CAPTURE_OPTIONS override")
     health_log_interval: float = Field(default=60.0, description="Seconds between periodic capture health log lines (0 = off)")
     restart: RestartSettings = Field(default_factory=RestartSettings, description="Reconnect policy")
+    timestamp: TimestampSettings = Field(default_factory=TimestampSettings, description="Optional OSD timestamp-overwrite overlay")
     extras: dict[str, Any] = Field(default_factory=dict, description="Sanctioned freeform channel for unmodeled fields")
 
 

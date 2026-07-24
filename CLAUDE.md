@@ -77,6 +77,12 @@ All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses
 - `read()` blocks up to `timeout` while down (no busy-spin), returns instantly after `stop()`
 - Config: nested `capture.restart:` block; legacy flat `auto_restart_on_fail`/`restart_delay`
   still honored. Precedence: **overrides > `restart.*` > legacy flat > constructor defaults**
+- **Optional OSD timestamp overwrite** (`timestamp_overlay`, off by default): when enabled the
+  capture thread stamps current system time over the camera's on-screen timestamp on every
+  published frame (Hikvision clocks drift), so all consumers inherit the corrected time from one
+  overlay. Reuses `utils.hide_camera_timestamp_and_add_current_time`; fail-open (a bad options
+  dict logs once and publishes the un-stamped frame). Config: nested `capture.timestamp:` block
+  (`enabled`, `rect_ratios`/`rect_coords`, `hide_color`, `font_color`, `font_scale`, `time_format`)
 
 **`api_client.py`** — `ApiClient` generic, pooled HTTP client (the v4 client; prefer for new code).
 - `Response`/`EndpointProfile`/`ApiClient`; backed by one pooled `requests.Session` (keep-alive, `max_retries=0` so urllib3 doesn't double-retry)
@@ -149,6 +155,15 @@ cameras:
         reset_after: 30.0
         max_attempts: null    # null = forever
         stall_timeout: null   # null = auto max(5, 20/fps); 0 = off
+        extras: {}
+      timestamp:              # overwrite camera OSD timestamp with current system time
+        enabled: false        # stamps every published frame when true
+        rect_ratios: null     # (x,y,w,h) ratios; null = top-left OSD default
+        rect_coords: null     # (x,y,w,h) pixels; overrides rect_ratios
+        hide_color: null      # BGR hide rect; null = white
+        font_color: null      # BGR text; null = black
+        font_scale: null      # null = auto from rect height
+        time_format: null     # strftime; null = '%Y-%m-%d %H:%M:%S'
         extras: {}
       auto_restart_on_fail: null  # LEGACY → restart.enabled
       restart_delay: null         # LEGACY → restart.delay
