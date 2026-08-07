@@ -93,6 +93,105 @@ def mat_to_response(frame, max_width=UPLOAD_IMAGE_MAX_WIDTH_DEFAULT, jpeg_qualit
         _logger.error(f"Error during image resizing or encoding: {e}")
         return None
 
+# --- styled stream badges (variant B: slate + indigo accent bar + live dot) ---
+# PIL patches are pre-rendered and cached (location: once; time: once per
+# second) and numpy-blended per frame, so the per-frame cost at 10 fps is a
+# couple of small array ops. Falls back to the cv2 badge if PIL/fonts fail.
+_BADGE_CACHE = {}
+_BADGE_BG_RGBA = (15, 23, 42, 180)        # slate
+_BADGE_ACCENT_RGBA = (99, 102, 241, 230)  # indigo bar
+_BADGE_DOT_RGB = (74, 222, 128)           # live dot
+_BADGE_KICKER_RGB = (147, 197, 253)       # "AI SURVEILLANCE"
+_FONT_DIR = "/usr/share/fonts/truetype/dejavu/"
+
+
+def _badge_font(bold, px):
+    from PIL import ImageFont
+    path = _FONT_DIR + ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf")
+    key = ("font", path, px)
+    f = _BADGE_CACHE.get(key)
+    if f is None:
+        f = ImageFont.truetype(path, px)
+        _BADGE_CACHE[key] = f
+    return f
+
+
+def _badge_patch(lines, pad_x, pad_y, gap, radius, dot_px=0):
+    """Render a rounded slate badge with an accent bar as (bgr, alpha) arrays.
+
+    lines: list of (text, PIL_font, rgb) drawn top to bottom, centered when
+    multiple, left-aligned after the optional live dot when single.
+    """
+    from PIL import Image, ImageDraw
+    d0 = ImageDraw.Draw(Image.new("RGBA", (4, 4)))
+    boxes = [d0.textbbox((0, 0), t, font=f) for t, f, _ in lines]
+    ws = [b[2] - b[0] for b in boxes]
+    hs = [b[3] - b[1] for b in boxes]
+    dot_w = dot_px + max(6, dot_px // 1) if dot_px else 0
+    bw = max(ws) + 2 * pad_x + dot_w
+    bh = sum(hs) + gap * (len(lines) - 1) + 2 * pad_y
+    img = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((0, 0, bw - 1, bh - 1), radius=radius, fill=_BADGE_BG_RGBA)
+    d.rounded_rectangle((0, 0, 4, bh - 1), radius=2, fill=_BADGE_ACCENT_RGBA)
+    if dot_px:
+        cy = bh // 2
+        d.ellipse((pad_x, cy - dot_px // 2, pad_x + dot_px, cy + dot_px // 2),
+                  fill=_BADGE_DOT_RGB + (255,))
+    y = pad_y
+    for (t, f, rgb), b, w, h in zip(lines, boxes, ws, hs):
+        x = pad_x + dot_w if len(lines) == 1 else (bw - w) // 2
+        d.text((x, y - b[1]), t, font=f, fill=rgb + (255,))
+        y += h + gap
+    arr = np.asarray(img, dtype=np.uint8)
+    bgr = arr[..., 2::-1].copy()
+    alpha = (arr[..., 3:4].astype(np.float32)) / 255.0
+    return bgr, alpha
+
+
+def _blend_patch(frame, patch, x0, y0):
+    bgr, alpha = patch
+    h, w = bgr.shape[:2]
+    fh, fw = frame.shape[:2]
+    x0 = max(0, min(x0, fw - w)); y0 = max(0, min(y0, fh - h))
+    roi = frame[y0:y0 + h, x0:x0 + w]
+    roi[:] = (bgr.astype(np.float32) * alpha
+              + roi.astype(np.float32) * (1.0 - alpha)).astype(np.uint8)
+
+
+def _draw_badges_pil(frame, time_string, corner_label, margin_x, margin_y):
+    fh, fw = frame.shape[:2]
+    s = fh / 720.0
+    key_t = ("time", time_string, fw, fh)
+    patch_t = _BADGE_CACHE.get(key_t)
+    if patch_t is None:
+        # keep the cache from accumulating one entry per second
+        for k in [k for k in _BADGE_CACHE if k[0] == "time"]:
+            del _BADGE_CACHE[k]
+        patch_t = _badge_patch(
+            [(time_string, _badge_font(True, max(12, int(19 * s))), (255, 255, 255))],
+            pad_x=int(14 * s), pad_y=int(9 * s), gap=0,
+            radius=max(4, int(10 * s)), dot_px=max(6, int(8 * s)))
+        _BADGE_CACHE[key_t] = patch_t
+    _blend_patch(frame, patch_t, margin_x, margin_y)
+
+    if corner_label:
+        key_l = ("loc", str(corner_label), fw, fh)
+        patch_l = _BADGE_CACHE.get(key_l)
+        if patch_l is None:
+            kicker = " ".join("AI SURVEILLANCE")
+            patch_l = _badge_patch(
+                [(kicker, _badge_font(False, max(8, int(12 * s))), _BADGE_KICKER_RGB),
+                 (str(corner_label), _badge_font(True, max(13, int(21 * s))),
+                  (255, 255, 255))],
+                pad_x=int(16 * s), pad_y=int(10 * s), gap=int(5 * s),
+                radius=max(4, int(10 * s)))
+            _BADGE_CACHE[key_l] = patch_l
+        h, w = patch_l[0].shape[:2]
+        _blend_patch(frame, patch_l, fw - margin_x - w, fh - margin_y - h)
+    return frame
+
+
 def hide_camera_timestamp_and_add_current_time(
     frame,
     camera_ts_rect_coords=None,
@@ -107,7 +206,10 @@ def hide_camera_timestamp_and_add_current_time(
     new_ts_padding_ratio=0.1,
     timestamp=None,
     inplace=False,
-    time_format="%Y-%m-%d %H:%M:%S"
+    time_format="%Y-%m-%d %H:%M:%S",
+    badge=True,
+    badge_alpha=0.55,
+    corner_label=None,
 ):
     """
     Hides a region on a frame (defined by pixel coordinates or ratios)
@@ -157,14 +259,76 @@ def hide_camera_timestamp_and_add_current_time(
         print("Warning: No rectangle coordinates or ratios. Using small default.")
         rect_x, rect_y, rect_w, rect_h = 10, 10, 100, 20
 
-    # 2. Hide the area with a filled rectangle
-    cv2.rectangle(output_frame, (rect_x, rect_y), (rect_x + rect_w, rect_y + rect_h),
-                  hide_rect_color, -1)
-
     # 3. Get current time and format it
     current_unix_time = time.time() if timestamp is None else timestamp
     dt_object = datetime.datetime.fromtimestamp(current_unix_time)
     time_string = dt_object.strftime(time_format)
+
+    # Badge mode: styled slate badges (PIL, cached patches). Assumes the
+    # camera's own OSD is disabled (nothing left to hide). Falls back to the
+    # plain cv2 pill below if PIL or the DejaVu fonts are unavailable.
+    if badge and _BADGE_CACHE.get("pil_broken") is not True:
+        try:
+            return _draw_badges_pil(output_frame, time_string, corner_label,
+                                    max(10, rect_x), max(10, rect_y))
+        except Exception:  # noqa: BLE001 -- never let styling kill the capture thread
+            _BADGE_CACHE["pil_broken"] = True
+
+    # cv2 fallback: auto-sized semi-transparent rounded pill
+    if badge:
+        scale = np.clip(rect_h * 0.022, 0.3, 2.5) if new_ts_font_scale is None \
+            else new_ts_font_scale
+        thick = max(1, int(scale + 0.5))
+        font = cv2.FONT_HERSHEY_DUPLEX
+        (tw, th), baseline = cv2.getTextSize(time_string, font, scale, thick)
+        pad = max(4, int(th * 0.6))
+        bw, bh = tw + 2 * pad, th + baseline + 2 * pad
+        x0 = int(np.clip(rect_x, 0, max(0, frame_w - bw)))
+        y0 = int(np.clip(rect_y, 0, max(0, frame_h - bh)))
+        x1, y1 = min(x0 + bw, frame_w), min(y0 + bh, frame_h)
+        r = max(2, min(bh // 3, 12))
+
+        roi = output_frame[y0:y1, x0:x1]
+        ov = roi.copy()
+        w, h = x1 - x0, y1 - y0
+        color = tuple(int(c) for c in hide_rect_color)
+        cv2.rectangle(ov, (r, 0), (w - r, h), color, -1)
+        cv2.rectangle(ov, (0, r), (w, h - r), color, -1)
+        for cx, cy in ((r, r), (w - r, r), (r, h - r), (w - r, h - r)):
+            cv2.circle(ov, (cx, cy), r, color, -1, cv2.LINE_AA)
+        cv2.addWeighted(ov, badge_alpha, roi, 1.0 - badge_alpha, 0, dst=roi)
+
+        cv2.putText(output_frame, time_string, (x0 + pad, y0 + pad + th),
+                    font, scale, tuple(int(c) for c in new_ts_font_color),
+                    thick, cv2.LINE_AA)
+
+        # Optional location/name badge, bottom-right, same style as the time badge
+        if corner_label:
+            (lw, lh), lb = cv2.getTextSize(str(corner_label), font, scale, thick)
+            lpad = max(4, int(lh * 0.6))
+            lbw, lbh = lw + 2 * lpad, lh + lb + 2 * lpad
+            margin = max(6, rect_x)  # mirror the time badge's left margin
+            lx0 = max(0, frame_w - margin - lbw)
+            ly0 = max(0, frame_h - margin - lbh)
+            lx1, ly1 = min(lx0 + lbw, frame_w), min(ly0 + lbh, frame_h)
+            lr = max(2, min((ly1 - ly0) // 3, 12))
+            lroi = output_frame[ly0:ly1, lx0:lx1]
+            lov = lroi.copy()
+            w2, h2 = lx1 - lx0, ly1 - ly0
+            color = tuple(int(c) for c in hide_rect_color)
+            cv2.rectangle(lov, (lr, 0), (w2 - lr, h2), color, -1)
+            cv2.rectangle(lov, (0, lr), (w2, h2 - lr), color, -1)
+            for cx, cy in ((lr, lr), (w2 - lr, lr), (lr, h2 - lr), (w2 - lr, h2 - lr)):
+                cv2.circle(lov, (cx, cy), lr, color, -1, cv2.LINE_AA)
+            cv2.addWeighted(lov, badge_alpha, lroi, 1.0 - badge_alpha, 0, dst=lroi)
+            cv2.putText(output_frame, str(corner_label), (lx0 + lpad, ly0 + lpad + lh),
+                        font, scale, tuple(int(c) for c in new_ts_font_color),
+                        thick, cv2.LINE_AA)
+        return output_frame
+
+    # 2. Hide the area with a filled rectangle (legacy solid-strip mode)
+    cv2.rectangle(output_frame, (rect_x, rect_y), (rect_x + rect_w, rect_y + rect_h),
+                  hide_rect_color, -1)
 
     # 4. Determine font scale for the new timestamp
     if new_ts_font_scale is None:
