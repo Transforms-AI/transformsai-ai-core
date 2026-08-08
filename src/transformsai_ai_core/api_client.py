@@ -617,7 +617,11 @@ class ApiClient:
                 )
                 resp = self._wrap(r, attempts, from_cache_retry)
                 if resp.ok:
-                    self.logger.info(
+                    # DEBUG, not INFO: on polling clients (mediamtx demand every
+                    # 3s, pending every 5s) this line alone was tens of
+                    # thousands of journal writes a day on SD-card nodes.
+                    # Failures below still log at WARNING/ERROR.
+                    self.logger.debug(
                         f"{name}: HTTP {resp.status_code} {prepared['method']} {prepared['url']} "
                         f"({resp.elapsed:.3f}s, attempt {attempts}/{self.max_retries + 1})"
                     )

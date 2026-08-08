@@ -651,7 +651,10 @@ class VideoCaptureAsync:
         if self._restarts_since_log or not stats['is_healthy']:
             self.logger.info(f"{message} last_error={stats['last_error']}")
         else:
-            self.logger.debug(message)
+            # INFO on purpose: one line a minute is the liveness beacon the
+            # node watchdog uses to tell a quiet-but-alive process from a
+            # frozen one. Keep this the only sub-minute-period INFO log.
+            self.logger.info(message)
         self._restarts_since_log = 0
 
     def _run_loop(self):
