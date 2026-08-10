@@ -244,16 +244,6 @@ class MediaMTXStreamer:
             self._stop_demand_supervisor()
         self._ensure_ffmpeg_stopped()
 
-    def _half_bitrate(self):
-        """Half the configured video bitrate, as an ffmpeg rate string.
-        Used as the VBV buffer: half a second's worth keeps keyframe bursts
-        bounded without starving quality. Falls back to the bitrate itself
-        when the string cannot be parsed."""
-        m = re.match(r'^(\d+)([kKmM]?)$', str(self.bitrate).strip())
-        if not m:
-            return self.bitrate
-        return f"{max(1, int(m.group(1)) // 2)}{m.group(2)}"
-
     def _ensure_ffmpeg_started(self):
         """Start FFmpeg streaming process with diagnostics."""
         if self.is_streaming:
@@ -329,14 +319,19 @@ class MediaMTXStreamer:
             ])
             if self.audio_device:
                 # VBV-cap the video so keyframes go out as a stream, not a
-                # burst: uncapped 720p I-frames are 100+ RTP packets that
-                # flood the server's small per-viewer WebRTC queue, and the
-                # audio packets queued behind them get culled (measured: 1/3
-                # of audio concealed, in bursts on the keyframe cadence;
-                # audio-only publishes were clean).
+                # burst that floods the server's per-viewer WebRTC queue. A
+                # full second of buffer: the half-second one visibly "breathed"
+                # -- each keyframe starved the frames after it and quality
+                # cycled bad-to-good on the GOP cadence.
+                #
+                # The -g here overrides the short one in the common settings
+                # (last option wins): a keyframe every ~1s was the other half
+                # of that quality cycle, spending a third of the bitrate on
+                # I-frames. ~4s GOP is still a fast WebRTC join.
                 ffmpeg_cmd.extend([
                     '-maxrate', self.bitrate,
-                    '-bufsize', self._half_bitrate(),
+                    '-bufsize', self.bitrate,
+                    '-g', str(self.fps * 4),
                 ])
             if self.audio_device:
                 # Stamp video frames with their real arrival time. The
