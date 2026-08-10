@@ -26,7 +26,9 @@ class MediaMTXStreamer:
                  debug_log_interval=60.0, encoder_preset="ultrafast",
                  encoder_codec="copy", stream_queue_size=2, hw_encode=False,
                  on_demand=False, demand_url="", demand_poll_interval=3.0,
-                 demand_grace_period=10.0, demand_timeout=5.0, demand_check=None):
+                 demand_grace_period=10.0, demand_timeout=5.0, demand_check=None,
+                 audio_device=None, audio_rate=16000, audio_channels=2,
+                 audio_map_channel=0, audio_gain_db=18.0, audio_bitrate="24k"):
         self.mediamtx_ip = mediamtx_ip
         self.rtsp_port = rtsp_port
         self.camera_sn_id = camera_sn_id
@@ -49,6 +51,18 @@ class MediaMTXStreamer:
         self.demand_grace_period = demand_grace_period
         self.demand_timeout = demand_timeout
         self.demand_check = demand_check  # optional Callable[[], bool] override
+
+        # Optional live microphone track, captured by FFmpeg itself from ALSA.
+        # audio_device should be a dsnoop/plug PCM when anything else (e.g. a
+        # recorder service) captures the same mic -- a bare hw: device admits
+        # only one client. Opus is used on the wire: it is the one codec the
+        # WebRTC playback path accepts, and mediamtx passes it through to HLS.
+        self.audio_device = audio_device or None
+        self.audio_rate = audio_rate
+        self.audio_channels = audio_channels
+        self.audio_map_channel = audio_map_channel  # 0 = left (INMP441 L/R->GND)
+        self.audio_gain_db = audio_gain_db
+        self.audio_bitrate = audio_bitrate
 
         # Setup logging using central logger
         self.logger = get_logger(self)
@@ -254,9 +268,26 @@ class MediaMTXStreamer:
                 '-pix_fmt', 'bgr24',
                 '-s', f'{self.frame_width}x{self.frame_height}',
                 '-r', str(self.fps),
-                '-i', '-',
-                '-c:v', codec,
             ]
+            if self.audio_device:
+                # Wallclock timestamps on the piped video so it shares a clock
+                # with the realtime ALSA capture; without this the two inputs
+                # drift whenever the delivered frame rate differs from -r.
+                ffmpeg_cmd.extend([
+                    '-use_wallclock_as_timestamps', '1',
+                    '-thread_queue_size', '512',
+                ])
+            ffmpeg_cmd.extend(['-i', '-'])
+            if self.audio_device:
+                ffmpeg_cmd.extend([
+                    '-f', 'alsa',
+                    '-ac', str(self.audio_channels),
+                    '-ar', str(self.audio_rate),
+                    '-thread_queue_size', '1024',
+                    '-i', self.audio_device,
+                    '-map', '0:v:0', '-map', '1:a:0',
+                ])
+            ffmpeg_cmd.extend(['-c:v', codec])
             
             # Hardware-specific settings
             encoder_preset = self._map_preset_to_encoder(self.encoder_preset, codec)
@@ -277,6 +308,25 @@ class MediaMTXStreamer:
                 '-pix_fmt', 'yuv420p',
                 '-b:v', self.bitrate,
                 '-g', str(self.fps),
+            ])
+            if self.audio_device:
+                # Mic channel select + MEMS DC-offset highpass + fixed makeup
+                # gain through a limiter (raw MEMS audio is near-inaudible).
+                afilter = (
+                    f"pan=mono|c0=c{self.audio_map_channel},highpass=f=20"
+                )
+                if self.audio_gain_db:
+                    afilter += (
+                        f",volume={self.audio_gain_db}dB"
+                        ",alimiter=limit=0.97:level=false"
+                    )
+                ffmpeg_cmd.extend([
+                    '-af', afilter,
+                    '-c:a', 'libopus',
+                    '-b:a', self.audio_bitrate,
+                    '-application', 'voip',
+                ])
+            ffmpeg_cmd.extend([
                 '-f', 'rtsp',
                 '-rtsp_transport', 'tcp',
                 '-loglevel', 'warning',
@@ -781,5 +831,17 @@ class MediaMTXStreamer:
             "encoder_codec": encoder.get("codec", "copy"),
             "stream_queue_size": encoder.get("queue_size", 2),
         }
+        # Only when the section is present -- otherwise these keys would
+        # shadow any audio_* values arriving through extras/overrides.
+        audio = cfg.get("audio") or {}
+        if audio:
+            kwargs.update({
+                "audio_device": audio.get("device", None),
+                "audio_rate": audio.get("rate", 16000),
+                "audio_channels": audio.get("channels", 2),
+                "audio_map_channel": audio.get("map_channel", 0),
+                "audio_gain_db": audio.get("gain_db", 18.0),
+                "audio_bitrate": audio.get("bitrate", "24k"),
+            })
         kwargs = {**cfg.get("extras", {}), **kwargs, **overrides}
         return cls(**init_kwargs(cls, kwargs))

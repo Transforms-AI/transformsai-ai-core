@@ -206,6 +206,7 @@ class LivestreamConfig(BaseModel):
     demand_grace_period: float = Field(default=10.0, description="Seconds demand must stay OFF before stopping FFmpeg")
     demand_timeout: float = Field(default=5.0, description="HTTP timeout per demand poll (seconds)")
     settings: dict[str, Any] = Field(default_factory=dict, description="Freeform settings (NOT consumed by from_config)")
+    audio: dict[str, Any] = Field(default_factory=dict, description="Live microphone track consumed by MediaMTXStreamer.from_config (device/rate/channels/map_channel/gain_db/bitrate); empty = video-only")
     extras: dict[str, Any] = Field(default_factory=dict, description="Sanctioned freeform channel for unmodeled fields")
 
 
