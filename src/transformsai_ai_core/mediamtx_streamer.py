@@ -293,7 +293,10 @@ class MediaMTXStreamer:
                     '-f', 'alsa',
                     '-ac', str(self.audio_channels),
                     '-ar', str(self.audio_rate),
-                    '-thread_queue_size', '1024',
+                    # Deep enough to ride out multi-second uplink stalls
+                    # without an ALSA xrun (1024 blocked and dropped audio
+                    # whenever the TCP push backpressured).
+                    '-thread_queue_size', '8192',
                     # Same clock as the video input: with the two inputs on
                     # different timelines (audio 0-based, video wallclock) the
                     # muxed session's timestamp mapping sawtoothed and viewers
@@ -336,6 +339,17 @@ class MediaMTXStreamer:
                     '-bufsize', self._half_bitrate(),
                 ])
             if self.audio_device:
+                # Stamp video frames with their real arrival time. The
+                # rawvideo demuxer paces pts at the DECLARED -r regardless of
+                # -use_wallclock_as_timestamps, so with fewer delivered than
+                # declared fps the video timeline runs slow (9.5 real / 15
+                # declared = 0.63x) -- and the server's WebRTC A/V sync then
+                # culls the audio running "ahead" of that slow video clock
+                # (measured: audio delivery ratio == fps ratio, at any
+                # bitrate). RTSP readers do no track sync, hence unaffected.
+                ffmpeg_cmd.extend([
+                    '-vf', 'setpts=(RTCTIME-RTCSTART)/(TB*1000000)',
+                ])
                 # Mic channel select + MEMS DC-offset highpass + fixed makeup
                 # gain through a limiter (raw MEMS audio is near-inaudible).
                 afilter = (
