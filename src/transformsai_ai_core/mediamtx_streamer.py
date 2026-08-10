@@ -273,9 +273,15 @@ class MediaMTXStreamer:
                 # Wallclock timestamps on the piped video so it shares a clock
                 # with the realtime ALSA capture; without this the two inputs
                 # drift whenever the delivered frame rate differs from -r.
+                #
+                # The small queue is deliberate: at 512 a not-quite-realtime
+                # encoder hoarded 1.4GB of raw frames and the live stream
+                # drifted MINUTES behind. 32 frames (~3s) bounds the worst
+                # lag; past that the pipe blocks and the app-side queue
+                # drops frames instead -- degraded fps beats growing delay.
                 ffmpeg_cmd.extend([
                     '-use_wallclock_as_timestamps', '1',
-                    '-thread_queue_size', '512',
+                    '-thread_queue_size', '32',
                 ])
             ffmpeg_cmd.extend(['-i', '-'])
             if self.audio_device:
@@ -332,6 +338,10 @@ class MediaMTXStreamer:
                     '-maxrate', self.bitrate,
                     '-bufsize', self.bitrate,
                     '-g', str(self.fps * 4),
+                    # Explicit slice threads: with tune zerolatency x264 was
+                    # effectively single-threaded here and 720p encode ran at
+                    # 0.9x realtime -- the input backlog above was the result.
+                    '-threads', '4',
                 ])
             if self.audio_device:
                 # Stamp video frames with their real arrival time. The
