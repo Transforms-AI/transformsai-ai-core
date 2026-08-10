@@ -28,7 +28,8 @@ class MediaMTXStreamer:
                  on_demand=False, demand_url="", demand_poll_interval=3.0,
                  demand_grace_period=10.0, demand_timeout=5.0, demand_check=None,
                  audio_device=None, audio_rate=16000, audio_channels=2,
-                 audio_map_channel=0, audio_gain_db=18.0, audio_bitrate="24k"):
+                 audio_map_channel=0, audio_gain_db=18.0, audio_bitrate="24k",
+                 audio_source="alsa", audio_url=""):
         self.mediamtx_ip = mediamtx_ip
         self.rtsp_port = rtsp_port
         self.camera_sn_id = camera_sn_id
@@ -63,6 +64,12 @@ class MediaMTXStreamer:
         self.audio_map_channel = audio_map_channel  # 0 = left (INMP441 L/R->GND)
         self.audio_gain_db = audio_gain_db
         self.audio_bitrate = audio_bitrate
+        # 'alsa' = a local mic through the sound system; 'rtsp' = the audio
+        # track of another RTSP source, typically the IP camera's built-in
+        # mic. With 'rtsp' set, audio_url is the source and audio_device is
+        # ignored (audio is considered enabled when either is set).
+        self.audio_source = (audio_source or "alsa").lower()
+        self.audio_url = audio_url or ""
 
         # Setup logging using central logger
         self.logger = get_logger(self)
@@ -259,6 +266,9 @@ class MediaMTXStreamer:
         try:
             # Build FFmpeg command with auto-detected encoder
             codec = self.detected_encoder
+            audio_on = bool(
+                self.audio_url if self.audio_source == 'rtsp' else self.audio_device
+            )
             
             # Base command
             ffmpeg_cmd = [
@@ -269,9 +279,9 @@ class MediaMTXStreamer:
                 '-s', f'{self.frame_width}x{self.frame_height}',
                 '-r', str(self.fps),
             ]
-            if self.audio_device:
+            if audio_on:
                 # Wallclock timestamps on the piped video so it shares a clock
-                # with the realtime ALSA capture; without this the two inputs
+                # with the realtime audio capture; without this the two inputs
                 # drift whenever the delivered frame rate differs from -r.
                 #
                 # The small queue is deliberate: at 512 a not-quite-realtime
@@ -284,7 +294,23 @@ class MediaMTXStreamer:
                     '-thread_queue_size', '32',
                 ])
             ffmpeg_cmd.extend(['-i', '-'])
-            if self.audio_device:
+            if audio_on and self.audio_source == 'rtsp':
+                ffmpeg_cmd.extend([
+                    # SETUP only the audio track: without this the session
+                    # also pulls the source's video just to discard it --
+                    # wasted bandwidth and extra load on a fragile camera.
+                    '-allowed_media_types', 'audio',
+                    '-rtsp_transport', 'tcp',
+                    # Fail fast instead of hanging: an overloaded camera can
+                    # sit on the DESCRIBE for minutes; better to exit and let
+                    # the demand supervisor retry than to block the publish.
+                    '-timeout', '20000000',
+                    '-thread_queue_size', '8192',
+                    '-use_wallclock_as_timestamps', '1',
+                    '-i', self.audio_url,
+                    '-map', '0:v:0', '-map', '1:a:0',
+                ])
+            elif audio_on:
                 ffmpeg_cmd.extend([
                     '-f', 'alsa',
                     '-ac', str(self.audio_channels),
@@ -323,7 +349,7 @@ class MediaMTXStreamer:
                 '-b:v', self.bitrate,
                 '-g', str(self.fps),
             ])
-            if self.audio_device:
+            if audio_on:
                 # VBV-cap the video so keyframes go out as a stream, not a
                 # burst that floods the server's per-viewer WebRTC queue. A
                 # full second of buffer: the half-second one visibly "breathed"
@@ -343,7 +369,7 @@ class MediaMTXStreamer:
                     # 0.9x realtime -- the input backlog above was the result.
                     '-threads', '4',
                 ])
-            if self.audio_device:
+            if audio_on:
                 # Stamp video frames with their real arrival time. The
                 # rawvideo demuxer paces pts at the DECLARED -r regardless of
                 # -use_wallclock_as_timestamps, so with fewer delivered than
@@ -355,24 +381,35 @@ class MediaMTXStreamer:
                 ffmpeg_cmd.extend([
                     '-vf', 'setpts=(RTCTIME-RTCSTART)/(TB*1000000)',
                 ])
-                # Mic channel select + MEMS DC-offset highpass + fixed makeup
-                # gain through a limiter (raw MEMS audio is near-inaudible).
-                afilter = (
-                    f"pan=mono|c0=c{self.audio_map_channel},highpass=f=20"
-                )
-                if self.audio_gain_db:
-                    afilter += (
-                        f",volume={self.audio_gain_db}dB"
-                        ",alimiter=limit=0.97:level=false"
+                if self.audio_source == 'rtsp':
+                    # Camera audio arrives mono with the camera's own AGC;
+                    # only optional makeup gain, no channel select/highpass.
+                    afilter = ""
+                    if self.audio_gain_db:
+                        afilter = (
+                            f"volume={self.audio_gain_db}dB"
+                            ",alimiter=limit=0.97:level=false,"
+                        )
+                else:
+                    # Mic channel select + MEMS DC-offset highpass + fixed
+                    # makeup gain through a limiter (raw MEMS audio is
+                    # near-inaudible).
+                    afilter = (
+                        f"pan=mono|c0=c{self.audio_map_channel},highpass=f=20,"
                     )
+                    if self.audio_gain_db:
+                        afilter = afilter[:-1] + (
+                            f",volume={self.audio_gain_db}dB"
+                            ",alimiter=limit=0.97:level=false,"
+                        )
                 # The async resampler snaps samples onto the wallclock
                 # timestamps by stretching/padding up to 1000 samples/s: raw
-                # ALSA stamps jitter 10-20ms backward ("Non-monotonous DTS")
-                # and WebRTC receivers punish that with audible dropouts.
-                # Output lands at 48kHz because Opus over RTP is ALWAYS
-                # clocked at 48kHz (RFC 7587) -- encoding at the capture rate
-                # puts receivers on a stretched timeline.
-                afilter += ",aresample=48000:async=1000"
+                # capture stamps jitter 10-20ms backward ("Non-monotonous
+                # DTS") and WebRTC receivers punish that with audible
+                # dropouts. Output lands at 48kHz because Opus over RTP is
+                # ALWAYS clocked at 48kHz (RFC 7587) -- encoding at the
+                # capture rate puts receivers on a stretched timeline.
+                afilter += "aresample=48000:async=1000"
                 ffmpeg_cmd.extend([
                     '-af', afilter,
                     '-c:a', 'libopus',
@@ -892,15 +929,38 @@ class MediaMTXStreamer:
         }
         # Only when the section is present -- otherwise these keys would
         # shadow any audio_* values arriving through extras/overrides.
+        #
+        # Two shapes are accepted. Flat (one fixed source):
+        #   audio: {device: ..., rate: ..., gain_db: ..., bitrate: ...}
+        # Or switchable, with per-source settings kept side by side so
+        # flipping `source` is a one-key change:
+        #   audio:
+        #     source: "camera" | "mic"
+        #     camera: {url: ..., gain_db: ...}
+        #     mic: {device: ..., rate: ..., channels: ..., map_channel: ...,
+        #           gain_db: ...}
+        #     bitrate: "24k"
         audio = cfg.get("audio") or {}
         if audio:
-            kwargs.update({
-                "audio_device": audio.get("device", None),
-                "audio_rate": audio.get("rate", 16000),
-                "audio_channels": audio.get("channels", 2),
-                "audio_map_channel": audio.get("map_channel", 0),
-                "audio_gain_db": audio.get("gain_db", 18.0),
-                "audio_bitrate": audio.get("bitrate", "24k"),
-            })
+            source = str(audio.get("source", "")).lower()
+            if source in ("camera", "rtsp"):
+                cam = audio.get("camera") or {}
+                kwargs.update({
+                    "audio_source": "rtsp",
+                    "audio_url": cam.get("url", audio.get("url", "")),
+                    "audio_gain_db": cam.get("gain_db", 0),
+                    "audio_bitrate": audio.get("bitrate", "24k"),
+                })
+            else:
+                mic = audio.get("mic") or audio
+                kwargs.update({
+                    "audio_source": "alsa",
+                    "audio_device": mic.get("device", None),
+                    "audio_rate": mic.get("rate", 16000),
+                    "audio_channels": mic.get("channels", 2),
+                    "audio_map_channel": mic.get("map_channel", 0),
+                    "audio_gain_db": mic.get("gain_db", 18.0),
+                    "audio_bitrate": audio.get("bitrate", "24k"),
+                })
         kwargs = {**cfg.get("extras", {}), **kwargs, **overrides}
         return cls(**init_kwargs(cls, kwargs))
