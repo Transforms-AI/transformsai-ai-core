@@ -23,7 +23,10 @@ readTimeout: 10s
 writeTimeout: 10s
 # Size of the queue of outgoing packets.
 # A higher value allows to increase throughput, a lower value allows to save RAM.
-writeQueueSize: 128
+# 1024, not the stock 128: a single VBV-uncapped 720p keyframe is 100+ RTP
+# packets, and at 128 the audio packets queued behind it get culled -- WebRTC
+# viewers heard dropouts on every keyframe (2026-08-10). ~1.5MB per reader.
+writeQueueSize: 1024
 # Maximum size of outgoing UDP packets.
 # This can be decreased to avoid fragmentation on networks with a low UDP MTU.
 udpMaxPayloadSize: 1472

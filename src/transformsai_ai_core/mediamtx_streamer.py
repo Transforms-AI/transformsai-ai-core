@@ -244,6 +244,16 @@ class MediaMTXStreamer:
             self._stop_demand_supervisor()
         self._ensure_ffmpeg_stopped()
 
+    def _half_bitrate(self):
+        """Half the configured video bitrate, as an ffmpeg rate string.
+        Used as the VBV buffer: half a second's worth keeps keyframe bursts
+        bounded without starving quality. Falls back to the bitrate itself
+        when the string cannot be parsed."""
+        m = re.match(r'^(\d+)([kKmM]?)$', str(self.bitrate).strip())
+        if not m:
+            return self.bitrate
+        return f"{max(1, int(m.group(1)) // 2)}{m.group(2)}"
+
     def _ensure_ffmpeg_started(self):
         """Start FFmpeg streaming process with diagnostics."""
         if self.is_streaming:
@@ -284,6 +294,11 @@ class MediaMTXStreamer:
                     '-ac', str(self.audio_channels),
                     '-ar', str(self.audio_rate),
                     '-thread_queue_size', '1024',
+                    # Same clock as the video input: with the two inputs on
+                    # different timelines (audio 0-based, video wallclock) the
+                    # muxed session's timestamp mapping sawtoothed and viewers
+                    # heard periodic dropouts; audio-only publishes were clean.
+                    '-use_wallclock_as_timestamps', '1',
                     '-i', self.audio_device,
                     '-map', '0:v:0', '-map', '1:a:0',
                 ])
@@ -310,6 +325,17 @@ class MediaMTXStreamer:
                 '-g', str(self.fps),
             ])
             if self.audio_device:
+                # VBV-cap the video so keyframes go out as a stream, not a
+                # burst: uncapped 720p I-frames are 100+ RTP packets that
+                # flood the server's small per-viewer WebRTC queue, and the
+                # audio packets queued behind them get culled (measured: 1/3
+                # of audio concealed, in bursts on the keyframe cadence;
+                # audio-only publishes were clean).
+                ffmpeg_cmd.extend([
+                    '-maxrate', self.bitrate,
+                    '-bufsize', self._half_bitrate(),
+                ])
+            if self.audio_device:
                 # Mic channel select + MEMS DC-offset highpass + fixed makeup
                 # gain through a limiter (raw MEMS audio is near-inaudible).
                 afilter = (
@@ -320,11 +346,25 @@ class MediaMTXStreamer:
                         f",volume={self.audio_gain_db}dB"
                         ",alimiter=limit=0.97:level=false"
                     )
+                # The async resampler snaps samples onto the wallclock
+                # timestamps by stretching/padding up to 1000 samples/s: raw
+                # ALSA stamps jitter 10-20ms backward ("Non-monotonous DTS")
+                # and WebRTC receivers punish that with audible dropouts.
+                # Output lands at 48kHz because Opus over RTP is ALWAYS
+                # clocked at 48kHz (RFC 7587) -- encoding at the capture rate
+                # puts receivers on a stretched timeline.
+                afilter += ",aresample=48000:async=1000"
                 ffmpeg_cmd.extend([
                     '-af', afilter,
                     '-c:a', 'libopus',
                     '-b:a', self.audio_bitrate,
                     '-application', 'voip',
+                    # Never let the muxer hold audio waiting to interleave
+                    # with late video frames: held audio leaves in ~1s TCP
+                    # bursts that the server's realtime WebRTC pacer sheds
+                    # (measured: 33 of 50 pkt/s delivered, rest concealed).
+                    # 100ms keeps the wire smooth for live viewers.
+                    '-max_interleave_delta', '100000',
                 ])
             ffmpeg_cmd.extend([
                 '-f', 'rtsp',
