@@ -102,6 +102,17 @@ All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses
 **`mediamtx_streamer.py`** — `MediaMTXStreamer` pushes frames to MediaMTX via FFmpeg.
 - Queue-based async frame updates; generates RTSP + WebRTC URLs
 - Supports hardware encoding (`hw_encode=True` auto-detects GPU encoder)
+- **Audio is best-effort, video is not.** If FFmpeg dies at the start check with the audio
+  input (ALSA `audio_device` or camera `audio_url`), the same start call relaunches
+  video-only (argv identical to a no-audio node; the 5 s rapid-restart guard is not hit).
+  Audio is retried at the next fresh start after a backoff (`audio_retry_backoff` 60 s,
+  doubling to `audio_retry_backoff_max` 900 s), reset only by a run that kept audio for
+  `audio_reset_after` (60 s). A mid-run death whose log blames input #1 (`[in#1`, `[alsa @`,
+  or the device/URL) counts too; output (`[out#0`) errors never do. A healthy video-only
+  stream is never restarted just to retry audio. The device is never probed from Python;
+  instead a launch with audio writes one blank frame during the start check, because
+  FFmpeg 9 doesn't open input #1 until input #0 (the pipe) has data.
+  Read-only `audio_active` / `audio_error` (credentials scrubbed), also in `get_stats()`
 
 **`yolo_wrapper.py`** — `YOLOWrapper` / `YOLOEWrapper` around Ultralytics.
 - Auto-exports to ONNX/TensorRT/RKNN when `export=True` in model dict

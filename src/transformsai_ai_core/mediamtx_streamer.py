@@ -11,6 +11,7 @@ import queue
 from threading import Lock
 from collections import deque
 from .central_logger import get_logger
+from .video_capture import _Backoff
 
 # --- Information About Script ---
 __name__ = "Streamer for MediaMTX Server"
@@ -20,7 +21,10 @@ class MediaMTXStreamer:
     """
     MediaMTX streamer with improved diagnostics and stream information.
     """
-    
+
+    # How long FFmpeg must stay up after launch to count as started
+    _start_check_s = 2.0
+
     def __init__(self, mediamtx_ip, rtsp_port, camera_sn_id, fps=30,
                  frame_width=1920, frame_height=1080, bitrate="1500k",
                  debug_log_interval=60.0, encoder_preset="ultrafast",
@@ -29,7 +33,8 @@ class MediaMTXStreamer:
                  demand_grace_period=10.0, demand_timeout=5.0, demand_check=None,
                  audio_device=None, audio_rate=16000, audio_channels=2,
                  audio_map_channel=0, audio_gain_db=18.0, audio_bitrate="24k",
-                 audio_source="alsa", audio_url=""):
+                 audio_source="alsa", audio_url="", audio_retry_backoff=60.0,
+                 audio_retry_backoff_max=900.0, audio_reset_after=60.0):
         self.mediamtx_ip = mediamtx_ip
         self.rtsp_port = rtsp_port
         self.camera_sn_id = camera_sn_id
@@ -70,6 +75,19 @@ class MediaMTXStreamer:
         # ignored (audio is considered enabled when either is set).
         self.audio_source = (audio_source or "alsa").lower()
         self.audio_url = audio_url or ""
+
+        # Audio is best-effort, video is not: when FFmpeg can't open (or
+        # loses) the audio input, the stream goes on video-only and audio is
+        # retried at a later fresh start, on this backoff. A run that keeps
+        # audio for audio_reset_after seconds proves the input healthy and
+        # resets it -- surviving the start check alone does not, since an
+        # RTSP audio open can hang for up to its 20s timeout first.
+        self.audio_reset_after = audio_reset_after
+        self._audio_backoff = _Backoff(audio_retry_backoff, audio_retry_backoff_max, jitter=0)
+        self._audio_retry_at = 0.0
+        self._audio_since = None  # start of the current run with audio
+        self._audio_active = False
+        self._audio_error = None
 
         # Setup logging using central logger
         self.logger = get_logger(self)
@@ -122,6 +140,7 @@ class MediaMTXStreamer:
         # Create logs directory once at init (not per start_streaming call)
         self.logs_dir = os.path.join(os.getcwd(), '.core-streamer-logs')
         os.makedirs(self.logs_dir, exist_ok=True)
+        self._ffmpeg_log_path = os.path.join(self.logs_dir, f'ffmpeg_cam_{self.camera_sn_id}.log')
         
         # Detect best encoder (hardware if available, software fallback)
         self.detected_encoder = self._detect_best_encoder() if hw_encode else 'libx264'
@@ -251,6 +270,20 @@ class MediaMTXStreamer:
             self._stop_demand_supervisor()
         self._ensure_ffmpeg_stopped()
 
+    @property
+    def _audio_configured(self):
+        return bool(self.audio_url if self.audio_source == 'rtsp' else self.audio_device)
+
+    @property
+    def audio_active(self):
+        """True while the running stream carries the audio track."""
+        return self._audio_active
+
+    @property
+    def audio_error(self):
+        """Short reason for the last audio failure; None once audio is back."""
+        return self._audio_error
+
     def _ensure_ffmpeg_started(self):
         """Start FFmpeg streaming process with diagnostics."""
         if self.is_streaming:
@@ -264,224 +297,315 @@ class MediaMTXStreamer:
             return False
         
         try:
-            # Build FFmpeg command with auto-detected encoder
-            codec = self.detected_encoder
-            audio_on = bool(
-                self.audio_url if self.audio_source == 'rtsp' else self.audio_device
-            )
-            
-            # Base command
-            ffmpeg_cmd = [
-                'ffmpeg', '-y',
-                '-f', 'rawvideo',
-                '-vcodec', 'rawvideo',
-                '-pix_fmt', 'bgr24',
-                '-s', f'{self.frame_width}x{self.frame_height}',
-                '-r', str(self.fps),
-            ]
-            if audio_on:
-                # Wallclock timestamps on the piped video so it shares a clock
-                # with the realtime audio capture; without this the two inputs
-                # drift whenever the delivered frame rate differs from -r.
-                #
-                # The small queue is deliberate: at 512 a not-quite-realtime
-                # encoder hoarded 1.4GB of raw frames and the live stream
-                # drifted MINUTES behind. 32 frames (~3s) bounds the worst
-                # lag; past that the pipe blocks and the app-side queue
-                # drops frames instead -- degraded fps beats growing delay.
-                ffmpeg_cmd.extend([
-                    '-use_wallclock_as_timestamps', '1',
-                    '-thread_queue_size', '32',
-                ])
-            ffmpeg_cmd.extend(['-i', '-'])
-            if audio_on and self.audio_source == 'rtsp':
-                ffmpeg_cmd.extend([
-                    # SETUP only the audio track: without this the session
-                    # also pulls the source's video just to discard it --
-                    # wasted bandwidth and extra load on a fragile camera.
-                    '-allowed_media_types', 'audio',
-                    '-rtsp_transport', 'tcp',
-                    # Fail fast instead of hanging: an overloaded camera can
-                    # sit on the DESCRIBE for minutes; better to exit and let
-                    # the demand supervisor retry than to block the publish.
-                    '-timeout', '20000000',
-                    '-thread_queue_size', '8192',
-                    '-use_wallclock_as_timestamps', '1',
-                    '-i', self.audio_url,
-                    '-map', '0:v:0', '-map', '1:a:0',
-                ])
-            elif audio_on:
-                ffmpeg_cmd.extend([
-                    '-f', 'alsa',
-                    '-ac', str(self.audio_channels),
-                    '-ar', str(self.audio_rate),
-                    # Deep enough to ride out multi-second uplink stalls
-                    # without an ALSA xrun (1024 blocked and dropped audio
-                    # whenever the TCP push backpressured).
-                    '-thread_queue_size', '8192',
-                    # Same clock as the video input: with the two inputs on
-                    # different timelines (audio 0-based, video wallclock) the
-                    # muxed session's timestamp mapping sawtoothed and viewers
-                    # heard periodic dropouts; audio-only publishes were clean.
-                    '-use_wallclock_as_timestamps', '1',
-                    '-i', self.audio_device,
-                    '-map', '0:v:0', '-map', '1:a:0',
-                ])
-            ffmpeg_cmd.extend(['-c:v', codec])
-            
-            # Hardware-specific settings
-            encoder_preset = self._map_preset_to_encoder(self.encoder_preset, codec)
-            
-            if 'nvenc' in codec:
-                # NVIDIA: Use mapped preset (nvenc doesn't support -tune option)
-                ffmpeg_cmd.extend(['-preset', encoder_preset])
-            elif 'qsv' in codec or 'vaapi' in codec:
-                # Intel/AMD: Use mapped preset
-                ffmpeg_cmd.extend(['-preset', encoder_preset])
-            elif codec == 'libx264':
-                # Software: Full control with tuning
-                ffmpeg_cmd.extend(['-preset', encoder_preset, '-tune', 'zerolatency'])
-            
-            # Common settings
-            ffmpeg_cmd.extend([
-                '-profile:v', 'main',
-                '-pix_fmt', 'yuv420p',
-                '-b:v', self.bitrate,
-                '-g', str(self.fps),
-            ])
-            if audio_on:
-                # VBV-cap the video so keyframes go out as a stream, not a
-                # burst that floods the server's per-viewer WebRTC queue. A
-                # full second of buffer: the half-second one visibly "breathed"
-                # -- each keyframe starved the frames after it and quality
-                # cycled bad-to-good on the GOP cadence.
-                #
-                # The -g here overrides the short one in the common settings
-                # (last option wins): a keyframe every ~1s was the other half
-                # of that quality cycle, spending a third of the bitrate on
-                # I-frames. ~4s GOP is still a fast WebRTC join.
-                ffmpeg_cmd.extend([
-                    '-maxrate', self.bitrate,
-                    '-bufsize', self.bitrate,
-                    '-g', str(self.fps * 4),
-                    # Explicit slice threads: with tune zerolatency x264 was
-                    # effectively single-threaded here and 720p encode ran at
-                    # 0.9x realtime -- the input backlog above was the result.
-                    '-threads', '4',
-                ])
-            if audio_on:
-                # Stamp video frames with their real arrival time. The
-                # rawvideo demuxer paces pts at the DECLARED -r regardless of
-                # -use_wallclock_as_timestamps, so with fewer delivered than
-                # declared fps the video timeline runs slow (9.5 real / 15
-                # declared = 0.63x) -- and the server's WebRTC A/V sync then
-                # culls the audio running "ahead" of that slow video clock
-                # (measured: audio delivery ratio == fps ratio, at any
-                # bitrate). RTSP readers do no track sync, hence unaffected.
-                ffmpeg_cmd.extend([
-                    '-vf', 'setpts=(RTCTIME-RTCSTART)/(TB*1000000)',
-                ])
-                if self.audio_source == 'rtsp':
-                    # Camera audio arrives mono with the camera's own AGC;
-                    # only optional makeup gain, no channel select/highpass.
-                    afilter = ""
-                    if self.audio_gain_db:
-                        afilter = (
-                            f"volume={self.audio_gain_db}dB"
-                            ",alimiter=limit=0.97:level=false,"
-                        )
-                else:
-                    # Mic channel select + MEMS DC-offset highpass + fixed
-                    # makeup gain through a limiter (raw MEMS audio is
-                    # near-inaudible).
-                    afilter = (
-                        f"pan=mono|c0=c{self.audio_map_channel},highpass=f=20,"
-                    )
-                    if self.audio_gain_db:
-                        afilter = afilter[:-1] + (
-                            f",volume={self.audio_gain_db}dB"
-                            ",alimiter=limit=0.97:level=false,"
-                        )
-                # The async resampler snaps samples onto the wallclock
-                # timestamps by stretching/padding up to 1000 samples/s: raw
-                # capture stamps jitter 10-20ms backward ("Non-monotonous
-                # DTS") and WebRTC receivers punish that with audible
-                # dropouts. Output lands at 48kHz because Opus over RTP is
-                # ALWAYS clocked at 48kHz (RFC 7587) -- encoding at the
-                # capture rate puts receivers on a stretched timeline.
-                afilter += "aresample=48000:async=1000"
-                ffmpeg_cmd.extend([
-                    '-af', afilter,
-                    '-c:a', 'libopus',
-                    '-b:a', self.audio_bitrate,
-                    '-application', 'voip',
-                    # Never let the muxer hold audio waiting to interleave
-                    # with late video frames: held audio leaves in ~1s TCP
-                    # bursts that the server's realtime WebRTC pacer sheds
-                    # (measured: 33 of 50 pkt/s delivered, rest concealed).
-                    # 100ms keeps the wire smooth for live viewers.
-                    '-max_interleave_delta', '100000',
-                ])
-            ffmpeg_cmd.extend([
-                '-f', 'rtsp',
-                '-rtsp_transport', 'tcp',
-                '-loglevel', 'warning',
-                self.rtsp_url
-            ])
-            
-            # Create log file for FFmpeg output
-            log_file_path = os.path.join(self.logs_dir, f'ffmpeg_cam_{self.camera_sn_id}.log')
-            self.ffmpeg_log_file = open(log_file_path, 'w')
-            
-            self.ffmpeg_process = subprocess.Popen(
-                ffmpeg_cmd,
-                stdin=subprocess.PIPE,
-                stdout=self.ffmpeg_log_file,
-                stderr=subprocess.STDOUT,  # Redirect stderr to log file
-                bufsize=0,
-                preexec_fn=os.setsid if os.name != 'nt' else None
-            )
-            
-            # Wait longer for FFmpeg to initialize
-            time.sleep(2.0)
-            
-            if self.ffmpeg_process.poll() is None:
-                self.is_streaming = True
-                self.restart_count += 1
-                self.last_restart_time = current_time
-                
-                # Start async frame writer thread
-                if self.stream_queue_size > 0:
-                    self._frame_queue = queue.Queue(maxsize=self.stream_queue_size)
-                    self._writer_stop_event.clear()
-                    self._writer_thread = threading.Thread(
-                        target=self._frame_writer_loop,
-                        name=f"MediaMTX_Writer_{self.camera_sn_id}",
-                        daemon=True
-                    )
-                    self._writer_thread.start()
-                    self.logger.info(f"[Stream] Async writer thread started (queue size: {self.stream_queue_size})")
-                
-                # Print stream information
-                self._print_stream_info()
-                
-                self.logger.info(f"[Stream] Streaming started successfully (restart #{self.restart_count})")
-                return True
-            else:
-                # Process died immediately - check log
-                if self.ffmpeg_log_file:
-                    self.ffmpeg_log_file.close()
-                    self.ffmpeg_log_file = None
-                with open(log_file_path, 'r') as f:
-                    error_log = f.read()
-                self.logger.error(f"[FFmpeg] Failed to start. Log file: {log_file_path}")
+            with_audio = self._audio_configured and current_time >= self._audio_retry_at
+            if self._audio_configured and not with_audio:
+                self.logger.debug(f"[Audio] Starting video-only, audio retry in "
+                                  f"{self._audio_retry_at - current_time:.0f}s")
+
+            error_log = self._spawn_ffmpeg(self._build_ffmpeg_cmd(with_audio), prime=with_audio)
+            if error_log is not None and with_audio:
+                # Audio is best-effort: go again without it, right away. The
+                # failure is charged to audio only if video then works --
+                # when both die (e.g. MediaMTX down) audio wasn't the cause.
+                self.logger.error(f"[FFmpeg] Failed to start with audio, retrying video-only. "
+                                  f"Log file: {self._ffmpeg_log_path}. Error output: {error_log[-500:]}")
+                with_audio = False
+                audio_log, error_log = error_log, self._spawn_ffmpeg(self._build_ffmpeg_cmd(False))
+                if error_log is None:
+                    self._note_audio_failure(self._audio_failure_line(audio_log)
+                                             or self._last_line(audio_log))
+            if error_log is not None:
+                self.logger.error(f"[FFmpeg] Failed to start. Log file: {self._ffmpeg_log_path}")
                 self.logger.error(f"[FFmpeg] Error output: {error_log[-500:]}")
                 return False
+
+            self.is_streaming = True
+            self.restart_count += 1
+            self.last_restart_time = current_time
+            if with_audio:
+                if self._audio_error:
+                    self.logger.info("[Audio] Stream started with audio again")
+                self._audio_error = None
+                self._audio_since = time.time()
+            self._audio_active = with_audio
+
+            # Start async frame writer thread
+            if self.stream_queue_size > 0:
+                self._frame_queue = queue.Queue(maxsize=self.stream_queue_size)
+                self._writer_stop_event.clear()
+                self._writer_thread = threading.Thread(
+                    target=self._frame_writer_loop,
+                    name=f"MediaMTX_Writer_{self.camera_sn_id}",
+                    daemon=True
+                )
+                self._writer_thread.start()
+                self.logger.info(f"[Stream] Async writer thread started (queue size: {self.stream_queue_size})")
+            
+            # Print stream information
+            self._print_stream_info()
+            
+            self.logger.info(f"[Stream] Streaming started successfully (restart #{self.restart_count})")
+            return True
                 
         except Exception as e:
             self.logger.error(f"[Stream] Error starting stream: {e}")
             return False
-    
+
+    def _spawn_ffmpeg(self, ffmpeg_cmd, prime=False):
+        """Launch FFmpeg and wait out the start check. Returns None while it
+        runs, else the tail of its log (the dead process is dropped)."""
+        self.ffmpeg_log_file = open(self._ffmpeg_log_path, 'w')
+        self.ffmpeg_process = subprocess.Popen(
+            ffmpeg_cmd,
+            stdin=subprocess.PIPE,
+            stdout=self.ffmpeg_log_file,
+            stderr=subprocess.STDOUT,  # Redirect stderr to log file
+            bufsize=0,
+            preexec_fn=os.setsid if os.name != 'nt' else None
+        )
+        if prime:
+            # FFmpeg (9 at least) reads the piped video before it opens the
+            # audio input: with nothing on stdin a dead mic sails through the
+            # check and only kills the stream once frames flow. One blank
+            # frame makes it open -- and fail on -- the audio input now.
+            threading.Thread(target=self._prime_ffmpeg, args=(self.ffmpeg_process,),
+                             daemon=True).start()
+
+        # Wait longer for FFmpeg to initialize
+        time.sleep(self._start_check_s)
+        if self.ffmpeg_process.poll() is None:
+            return None
+
+        self.ffmpeg_log_file.close()
+        self.ffmpeg_log_file = None
+        self.ffmpeg_process = None
+        return self._read_log_tail()
+
+    def _prime_ffmpeg(self, process):
+        # Under frame_lock so the writer can't interleave a frame into this one
+        with self.frame_lock:
+            try:
+                process.stdin.write(bytes(self.frame_width * self.frame_height * 3))
+                process.stdin.flush()
+            except (OSError, ValueError):
+                pass  # FFmpeg already gone or stopped: the start check reports it
+
+    def _read_log_tail(self, max_bytes=4096):
+        try:
+            with open(self._ffmpeg_log_path, 'rb') as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - max_bytes))
+                return f.read().decode('utf-8', 'replace')
+        except OSError:
+            return ""
+
+    @staticmethod
+    def _last_line(log):
+        lines = [line.strip() for line in log.splitlines() if line.strip()]
+        return lines[-1][:200] if lines else "FFmpeg exited"
+
+    def _audio_failure_line(self, log):
+        """The first FFmpeg log line blaming the audio input, shortened, or
+        None. Never probes the device itself (that would race the dsnoop share
+        and its other reader); FFmpeg's own failure is the signal. Input #1 is
+        always the audio (#0 is the piped video): FFmpeg >= 6.1 tags its lines
+        `[in#1`, older builds `[alsa @`, and every version names the input
+        (device or URL) when it fails to open. Output errors (`[out#0`) never
+        match, so a MediaMTX outage is not blamed on audio."""
+        ident = self.audio_url if self.audio_source == 'rtsp' else self.audio_device
+        for line in log.splitlines():
+            if '[in#1' in line or '[alsa @' in line or (ident and ident in line):
+                return re.sub(r'^\[[^\]]*\]\s*', '', line.strip())[:200]
+        return None
+
+    def _note_audio_failure(self, reason):
+        """Charge a failure to the audio input: the next fresh start goes
+        video-only until the backoff has elapsed."""
+        self._end_audio_run()
+        delay = self._audio_backoff.next()
+        self._audio_retry_at = time.time() + delay
+        # Goes to health reports: never carry RTSP credentials along
+        reason = re.sub(r'://[^/@\s]+@', '://***@', reason)
+        self._audio_error = reason
+        self.logger.warning(f"[Audio] Audio input failed ({reason}); streaming video-only, "
+                            f"retrying audio in {delay:.0f}s")
+
+    def _end_audio_run(self):
+        """Close the bookkeeping of the current run with audio. One that
+        lasted audio_reset_after seconds proves the input healthy, so the
+        retry backoff starts over from its first step."""
+        if (self._audio_since is not None
+                and time.time() - self._audio_since >= self.audio_reset_after):
+            self._audio_backoff.reset()
+        self._audio_since = None
+        self._audio_active = False
+
+    def _build_ffmpeg_cmd(self, audio_on):
+        """FFmpeg argv for this stream, with or without the audio input.
+        Video-only is exactly the command of a node with no audio configured."""
+        # Build FFmpeg command with auto-detected encoder
+        codec = self.detected_encoder
+        
+        # Base command
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-f', 'rawvideo',
+            '-vcodec', 'rawvideo',
+            '-pix_fmt', 'bgr24',
+            '-s', f'{self.frame_width}x{self.frame_height}',
+            '-r', str(self.fps),
+        ]
+        if audio_on:
+            # Wallclock timestamps on the piped video so it shares a clock
+            # with the realtime audio capture; without this the two inputs
+            # drift whenever the delivered frame rate differs from -r.
+            #
+            # The small queue is deliberate: at 512 a not-quite-realtime
+            # encoder hoarded 1.4GB of raw frames and the live stream
+            # drifted MINUTES behind. 32 frames (~3s) bounds the worst
+            # lag; past that the pipe blocks and the app-side queue
+            # drops frames instead -- degraded fps beats growing delay.
+            ffmpeg_cmd.extend([
+                '-use_wallclock_as_timestamps', '1',
+                '-thread_queue_size', '32',
+            ])
+        ffmpeg_cmd.extend(['-i', '-'])
+        if audio_on and self.audio_source == 'rtsp':
+            ffmpeg_cmd.extend([
+                # SETUP only the audio track: without this the session
+                # also pulls the source's video just to discard it --
+                # wasted bandwidth and extra load on a fragile camera.
+                '-allowed_media_types', 'audio',
+                '-rtsp_transport', 'tcp',
+                # Fail fast instead of hanging: an overloaded camera can
+                # sit on the DESCRIBE for minutes; better to exit and let
+                # the demand supervisor retry than to block the publish.
+                '-timeout', '20000000',
+                '-thread_queue_size', '8192',
+                '-use_wallclock_as_timestamps', '1',
+                '-i', self.audio_url,
+                '-map', '0:v:0', '-map', '1:a:0',
+            ])
+        elif audio_on:
+            ffmpeg_cmd.extend([
+                '-f', 'alsa',
+                '-ac', str(self.audio_channels),
+                '-ar', str(self.audio_rate),
+                # Deep enough to ride out multi-second uplink stalls
+                # without an ALSA xrun (1024 blocked and dropped audio
+                # whenever the TCP push backpressured).
+                '-thread_queue_size', '8192',
+                # Same clock as the video input: with the two inputs on
+                # different timelines (audio 0-based, video wallclock) the
+                # muxed session's timestamp mapping sawtoothed and viewers
+                # heard periodic dropouts; audio-only publishes were clean.
+                '-use_wallclock_as_timestamps', '1',
+                '-i', self.audio_device,
+                '-map', '0:v:0', '-map', '1:a:0',
+            ])
+        ffmpeg_cmd.extend(['-c:v', codec])
+
+        # Hardware-specific settings
+        encoder_preset = self._map_preset_to_encoder(self.encoder_preset, codec)
+
+        if 'nvenc' in codec:
+            # NVIDIA: Use mapped preset (nvenc doesn't support -tune option)
+            ffmpeg_cmd.extend(['-preset', encoder_preset])
+        elif 'qsv' in codec or 'vaapi' in codec:
+            # Intel/AMD: Use mapped preset
+            ffmpeg_cmd.extend(['-preset', encoder_preset])
+        elif codec == 'libx264':
+            # Software: Full control with tuning
+            ffmpeg_cmd.extend(['-preset', encoder_preset, '-tune', 'zerolatency'])
+
+        # Common settings
+        ffmpeg_cmd.extend([
+            '-profile:v', 'main',
+            '-pix_fmt', 'yuv420p',
+            '-b:v', self.bitrate,
+            '-g', str(self.fps),
+        ])
+        if audio_on:
+            # VBV-cap the video so keyframes go out as a stream, not a
+            # burst that floods the server's per-viewer WebRTC queue. A
+            # full second of buffer: the half-second one visibly "breathed"
+            # -- each keyframe starved the frames after it and quality
+            # cycled bad-to-good on the GOP cadence.
+            #
+            # The -g here overrides the short one in the common settings
+            # (last option wins): a keyframe every ~1s was the other half
+            # of that quality cycle, spending a third of the bitrate on
+            # I-frames. ~4s GOP is still a fast WebRTC join.
+            ffmpeg_cmd.extend([
+                '-maxrate', self.bitrate,
+                '-bufsize', self.bitrate,
+                '-g', str(self.fps * 4),
+                # Explicit slice threads: with tune zerolatency x264 was
+                # effectively single-threaded here and 720p encode ran at
+                # 0.9x realtime -- the input backlog above was the result.
+                '-threads', '4',
+            ])
+        if audio_on:
+            # Stamp video frames with their real arrival time. The
+            # rawvideo demuxer paces pts at the DECLARED -r regardless of
+            # -use_wallclock_as_timestamps, so with fewer delivered than
+            # declared fps the video timeline runs slow (9.5 real / 15
+            # declared = 0.63x) -- and the server's WebRTC A/V sync then
+            # culls the audio running "ahead" of that slow video clock
+            # (measured: audio delivery ratio == fps ratio, at any
+            # bitrate). RTSP readers do no track sync, hence unaffected.
+            ffmpeg_cmd.extend([
+                '-vf', 'setpts=(RTCTIME-RTCSTART)/(TB*1000000)',
+            ])
+            if self.audio_source == 'rtsp':
+                # Camera audio arrives mono with the camera's own AGC;
+                # only optional makeup gain, no channel select/highpass.
+                afilter = ""
+                if self.audio_gain_db:
+                    afilter = (
+                        f"volume={self.audio_gain_db}dB"
+                        ",alimiter=limit=0.97:level=false,"
+                    )
+            else:
+                # Mic channel select + MEMS DC-offset highpass + fixed
+                # makeup gain through a limiter (raw MEMS audio is
+                # near-inaudible).
+                afilter = (
+                    f"pan=mono|c0=c{self.audio_map_channel},highpass=f=20,"
+                )
+                if self.audio_gain_db:
+                    afilter = afilter[:-1] + (
+                        f",volume={self.audio_gain_db}dB"
+                        ",alimiter=limit=0.97:level=false,"
+                    )
+            # The async resampler snaps samples onto the wallclock
+            # timestamps by stretching/padding up to 1000 samples/s: raw
+            # capture stamps jitter 10-20ms backward ("Non-monotonous
+            # DTS") and WebRTC receivers punish that with audible
+            # dropouts. Output lands at 48kHz because Opus over RTP is
+            # ALWAYS clocked at 48kHz (RFC 7587) -- encoding at the
+            # capture rate puts receivers on a stretched timeline.
+            afilter += "aresample=48000:async=1000"
+            ffmpeg_cmd.extend([
+                '-af', afilter,
+                '-c:a', 'libopus',
+                '-b:a', self.audio_bitrate,
+                '-application', 'voip',
+                # Never let the muxer hold audio waiting to interleave
+                # with late video frames: held audio leaves in ~1s TCP
+                # bursts that the server's realtime WebRTC pacer sheds
+                # (measured: 33 of 50 pkt/s delivered, rest concealed).
+                # 100ms keeps the wire smooth for live viewers.
+                '-max_interleave_delta', '100000',
+            ])
+        ffmpeg_cmd.extend([
+            '-f', 'rtsp',
+            '-rtsp_transport', 'tcp',
+            '-loglevel', 'warning',
+            self.rtsp_url
+        ])
+        return ffmpeg_cmd
+
     def _print_stream_info(self):
         """Print stream information."""
         self.logger.info(f"[Stream] RTSP URL: {self.rtsp_url}")
@@ -495,6 +619,7 @@ class MediaMTXStreamer:
             return
 
         self.is_streaming = False
+        self._end_audio_run()
 
         # Stop async writer thread
         if self._writer_thread and self._writer_thread.is_alive():
@@ -639,6 +764,12 @@ class MediaMTXStreamer:
         if self.ffmpeg_process.poll() is not None:
             # Process died, but don't restart immediately
             self.logger.warning(f"[FFmpeg] Process died (exit code: {self.ffmpeg_process.returncode})")
+            # An audio-input death sends the restart below (or the demand
+            # supervisor's) video-only while the audio backoff runs
+            if self._audio_active:
+                reason = self._audio_failure_line(self._read_log_tail())
+                if reason:
+                    self._note_audio_failure(reason)
             self._ensure_ffmpeg_stopped()
 
             # In on-demand mode the supervisor re-launches on the next poll
@@ -896,6 +1027,8 @@ class MediaMTXStreamer:
             'avg_resize_time_ms': avg_resize_time * 1000,
             'avg_ping_time_ms': avg_ping_time * 1000,
             'buffer_issues': self.buffer_full_count,
+            'audio_active': self.audio_active,
+            'audio_error': self.audio_error,
             'system_metrics': system_metrics
         }
 
