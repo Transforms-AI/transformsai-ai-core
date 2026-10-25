@@ -384,7 +384,7 @@ class StreamConfig(CoreModel):
     """This camera's livestream. Size and fps default to the camera's capture values."""
 
     enabled: bool = Field(True, description="Publish this camera's stream")
-    name: NonEmptyStr = Field("cam_sn_{sn}_{camera}", description="Stream name template; placeholders {sn} (node.sn), {camera} (camera name), {index} (camera position)")
+    name: NonEmptyStr = Field("{sn}_{camera}", description="Stream name after the fixed 'cam_sn_' prefix; placeholders {sn} (node.sn), {camera} (camera name), {index} (camera position)")
     width: PositiveInt | None = Field(None, description="Stream width (null = capture.width, else the first frame's)")
     height: PositiveInt | None = Field(None, description="Stream height (null = capture.height, else the first frame's)")
     fps: PositiveFloat | None = Field(None, description="Stream fps (null = capture.fps, else 15)")
@@ -441,7 +441,7 @@ class CameraConfig(CoreModel):
         return self._index
 
     def stream_name(self, sn: str) -> str | None:
-        """Resolved stream name for node serial `sn`, or None without a stream block."""
+        """Full stream name ('cam_sn_' + rendered stream.name) for node serial `sn`, or None without a stream block."""
         if self.stream is None:
             return None
         return _urls.render_stream_name(self.stream.name, sn=sn, camera=self.name, index=self.index)

@@ -51,7 +51,7 @@ cameras:                                      # Cameras by name (a plain list is
         stall_timeout: null                   # Seconds without a decoded frame before forcing a reconnect (null = auto max(5, 20/fps); 0 = off)
     stream:                                   # This camera's livestream (null = none)
       enabled: true                           # Publish this camera's stream
-      name: cam_sn_{sn}_{camera}              # Stream name template; placeholders {sn} (node.sn), {camera} (camera name), {index} (camera position)
+      name: '{sn}_{camera}'                   # Stream name after the fixed 'cam_sn_' prefix; placeholders {sn} (node.sn), {camera} (camera name), {index} (camera position)
       width: null                             # Stream width (null = capture.width, else the first frame's)
       height: null                            # Stream height (null = capture.height, else the first frame's)
       fps: null                               # Stream fps (null = capture.fps, else 15)

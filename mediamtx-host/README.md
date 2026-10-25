@@ -183,17 +183,16 @@ cameras:
     source: {type: rtsp, host: 192.168.1.64, user: admin, password: "..."}
     stream:
       on_demand: true
-      # name: "cam_sn_{sn}_{camera}"   # the default
+      # name: "{sn}_{camera}"   # the default; the stream is cam_sn_<name>
 ```
 
 `on_demand: false` (the default) keeps always-on behavior; nothing else
 changes. Viewers watch at
 `https://mediamtx.transformsai.com/live/<stream name>/`.
 
-Stream names must start with `cam_sn_` for on-demand to work: `mediamtx.yml`
-only raises demand flags for `live/cam_sn_*` paths (core's default
-`cam_sn_{sn}_{camera}` does; `transformsaicore config validate` warns when an
-on-demand name doesn't).
+`mediamtx.yml` only raises demand flags for `live/cam_sn_*` paths. Core
+always puts the fixed `cam_sn_` prefix in front of `stream.name`, so every
+edge stream matches it.
 
 ### 9. Verify
 

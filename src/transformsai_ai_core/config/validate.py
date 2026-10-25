@@ -29,7 +29,7 @@ from .registry import dotted
 from .report import Issue, ValidationReport
 from .schema import CameraAudioInput, Config, RtspSource, normalize_cameras
 from .types import is_secret
-from .urls import DEMAND_NAME_PREFIX, is_valid_path_name
+from .urls import STREAM_NAME_PREFIX, is_valid_path_name
 
 # 4.x keys a 5.0 config should no longer carry, and where each went.
 MIGRATION_HINTS = {
@@ -57,7 +57,7 @@ MIGRATION_HINTS = {
     "load_options": "removed; `task` is a direct model key now",
     "lib_type": "removed (it was never used)",
     "mediamtx_ip": "renamed to mediamtx.host",
-    "camera_sn_id": "derived now: stream.name from node.sn",
+    "camera_sn_id": "derived now: the stream name is 'cam_sn_' + stream.name (default {sn}_{camera})",
     "frame_width": "derived now: stream.width (default: capture.width)",
     "frame_height": "derived now: stream.height (default: capture.height)",
     "hw_encode": "replaced by encoder.codec: auto",
@@ -387,11 +387,10 @@ def _cross_checks(config: Config, report: ValidationReport) -> None:
             report.error(f"{base}.stream.name",
                          f"resolved stream name {stream_name!r} has characters MediaMTX paths don't allow "
                          "(letters, digits and _ - . ~ only)")
-        if (stream.on_demand and not stream_name.startswith(DEMAND_NAME_PREFIX)
-                and (config.mediamtx is None or config.mediamtx.demand_url is None)):
+        if stream.name.startswith(STREAM_NAME_PREFIX):
             report.warning(f"{base}.stream.name",
-                           f"on-demand stream {stream_name!r} doesn't start with '{DEMAND_NAME_PREFIX}': the bundled "
-                           "mediamtx-host only raises demand flags for live/cam_sn_* paths")
+                           f"'{STREAM_NAME_PREFIX}' is added automatically; leave it out of stream.name",
+                           stream.name[len(STREAM_NAME_PREFIX):] or None)
         if stream_name in seen:
             report.error(f"{base}.stream.name",
                          f"stream name {stream_name!r} is also used by camera {seen[stream_name]!r}; two streams "

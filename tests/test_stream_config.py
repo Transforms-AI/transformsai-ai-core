@@ -66,18 +66,36 @@ class TestStreamNames(unittest.TestCase):
             {"source": RTSP, "stream": {"name": "{sn}-{index}"}},
             {"source": RTSP, "stream": {"name": "{sn}-{camera}"}},
         ]))
-        self.assertEqual(config.stream_name("camera_0"), "pb-00004-0")
-        self.assertEqual(config.stream_name("camera_1"), "pb-00004-camera_1")
+        self.assertEqual(config.stream_name("camera_0"), "cam_sn_pb-00004-0")
+        self.assertEqual(config.stream_name("camera_1"), "cam_sn_pb-00004-camera_1")
 
     def test_4x_name_kept_explicitly(self):
-        config, _ = load_config(config_with({"surveillance": {"source": RTSP, "stream": {"name": "cam_sn_{sn}"}}}))
+        config, report = load_config(config_with({"surveillance": {"source": RTSP, "stream": {"name": "{sn}"}}}))
         self.assertEqual(config.stream_urls("surveillance").rtsp,
                          "rtsp://mediamtx.example.com:8554/live/cam_sn_pb-00004")
+        self.assertEqual(report.warnings, [])
+
+    def test_prefix_is_fixed(self):
+        config, report = load_config(config_with({"a": {"source": RTSP, "stream": {"name": "front_{sn}", "on_demand": True}}}))
+        self.assertEqual(config.stream_name("a"), "cam_sn_front_pb-00004")
+        self.assertEqual(config.stream_urls("a").demand, "https://mediamtx.example.com/demand/cam_sn_front_pb-00004")
+        self.assertEqual(report.warnings, [])
+
+    def test_redundant_prefix_is_not_doubled(self):
+        config, report = load_config(config_with({"a": {"source": RTSP, "stream": {"name": "cam_sn_{sn}"}}}))
+        self.assertEqual(config.stream_name("a"), "cam_sn_pb-00004")
+        self.assertEqual([(i.path, i.suggestion) for i in report.warnings], [("cameras.a.stream.name", "{sn}")])
+
+    def test_streamer_adds_the_prefix_too(self):
+        s = MediaMTXStreamer("mediamtx.example.com", 8554, "testcam")
+        self.assertEqual(s.stream_name, "cam_sn_testcam")
+        self.assertEqual(s.rtsp_url, "rtsp://mediamtx.example.com:8554/live/cam_sn_testcam")
+        self.assertEqual(MediaMTXStreamer("h", 8554, "cam_sn_testcam").stream_name, "cam_sn_testcam")
 
     def test_names_must_be_unique(self):
         data = config_with({
-            "a": {"source": RTSP, "stream": {"name": "cam_sn_{sn}"}},
-            "b": {"source": RTSP, "stream": {"name": "cam_sn_{sn}"}},
+            "a": {"source": RTSP, "stream": {"name": "{sn}"}},
+            "b": {"source": RTSP, "stream": {"name": "{sn}"}},
         })
         with self.assertRaises(ConfigError) as ctx:
             load_config(data)
@@ -104,12 +122,6 @@ class TestStreamNames(unittest.TestCase):
         report = validate_config(config_with({"a": {"source": RTSP, "stream": {"name": "cam {sn}"}}}))
         self.assertIn("MediaMTX", report.errors[0].message)
 
-    def test_on_demand_name_outside_the_vps_pattern_warns(self):
-        _, report = load_config(config_with({"a": {"source": RTSP, "stream": {"name": "front_{sn}", "on_demand": True}}}))
-        self.assertEqual([i.path for i in report.warnings], ["cameras.a.stream.name"])
-        _, report = load_config(config_with({"a": {"source": RTSP, "stream": {"on_demand": True}}}))
-        self.assertEqual(report.warnings, [])
-
     def test_streams_need_a_server_host(self):
         data = config_with({"a": {"source": RTSP, "stream": {}}})
         del data["mediamtx"]
@@ -135,8 +147,8 @@ class TestUrlTemplates(unittest.TestCase):
 
     def test_webrtc_port_is_honoured(self):
         urls = build_stream_urls("10.0.0.2", "n", rtsp_port=9554, webrtc_port=9889)
-        self.assertEqual(urls.webrtc, "http://10.0.0.2:9889/live/n/")
-        self.assertEqual(urls.rtsp, "rtsp://10.0.0.2:9554/live/n")
+        self.assertEqual(urls.webrtc, "http://10.0.0.2:9889/live/cam_sn_n/")
+        self.assertEqual(urls.rtsp, "rtsp://10.0.0.2:9554/live/cam_sn_n")
 
     def test_custom_templates(self):
         urls = self.urls("h", rtsp_url="rtsp://{host}:{rtsp_port}/{name}",

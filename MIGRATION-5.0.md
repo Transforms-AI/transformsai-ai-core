@@ -91,7 +91,7 @@ saying where it went. The full commented reference is
 | `demand_url` (formatted with `{camera_sn_id}`) | `mediamtx.demand_url`, a template with `{host} {rtsp_port} {webrtc_port} {name}` |
 | (hard-coded RTSP/WebRTC URLs) | `mediamtx.rtsp_url`, `mediamtx.webrtc_url` templates (null = the 4.x URLs) |
 | `enabled` | `cameras.<name>.stream.enabled` |
-| `camera_sn_id` | derived: `stream.name`, default `cam_sn_{sn}_{camera}` ([§5](#5-behaviour-changes)) |
+| `camera_sn_id` | derived: `cam_sn_` + `stream.name`, default `{sn}_{camera}` ([§5](#5-behaviour-changes)) |
 | `fps`, `frame_width`, `frame_height` | derived from `capture.fps/width/height`; optional `stream.fps/width/height` overrides |
 | `bitrate`, `on_demand`, `debug_log_interval` | `stream.bitrate`, `stream.on_demand`, `stream.debug_log_interval` |
 | `hw_encode: true` | `stream.encoder.codec: auto` |
@@ -257,7 +257,7 @@ For code that builds components by hand:
 
 | Class | 4.x | 5.0 |
 |---|---|---|
-| `MediaMTXStreamer` | `mediamtx_ip`, `camera_sn_id` (the URL added `cam_sn_`) | `host`, `stream_name` (the full name, e.g. `"cam_sn_pb-00004"`) |
+| `MediaMTXStreamer` | `mediamtx_ip`, `camera_sn_id` (the URL added `cam_sn_`) | `host`, `stream_name` (still gets `cam_sn_` added: `"pb-00004"` → `cam_sn_pb-00004`) |
 | `MediaMTXStreamer` | `hw_encode=True`, `encoder_codec="copy"` (ignored) | `encoder_codec="auto"` / `"libx264"` / `"<encoder>"` |
 | `MediaMTXStreamer` | `audio_source="alsa"/"rtsp"`, `audio_map_channel` | `audio_input="alsa"/"camera"` (inferred from `audio_device`/`audio_url`), `audio_channel` |
 | `MediaMTXStreamer` | — | `webrtc_port`, `rtsp_url`/`webrtc_url`/`demand_url` templates, `audio_transport`, `audio_highpass_hz`, `audio_limiter` |
@@ -295,11 +295,13 @@ For code that builds components by hand:
 
 ## 5. Behaviour changes
 
-- **Stream name default.** It is `cam_sn_{sn}_{camera}`, which is unique per
-  camera. The 4.x URL was `cam_sn_{camera_sn_id}`; a single-stream node that must
-  keep its existing URL sets `stream.name: "cam_sn_{sn}"`. Two enabled streams that
-  resolve to the same name are a validation error. For on-demand to work with the
-  bundled `mediamtx-host`, a name must start with `cam_sn_` (the gate warns otherwise).
+- **Stream name.** It is always the fixed prefix `cam_sn_` followed by the
+  `stream.name` template, whose default `{sn}_{camera}` is unique per camera. The
+  prefix keeps every stream inside the bundled `mediamtx-host`'s `live/cam_sn_*`
+  on-demand rule. The 4.x URL was `cam_sn_{camera_sn_id}`; a single-stream node
+  that must keep its existing URL sets `stream.name: "{sn}"`. Writing the prefix
+  yourself (`"cam_sn_{sn}"`) still works, since it is never doubled, but the gate
+  warns. Two enabled streams that resolve to the same name are a validation error.
 - **WebRTC port.** `webrtc_port` is honoured in the bare-IP WebRTC URL.
 - **Model paths.** An explicit `path` always wins; 4.x replaced it with
   `models/<name>/<name>` when that file existed. Relative paths resolve against the
@@ -327,7 +329,7 @@ For code that builds components by hand:
 | `cameras[0]` (`local: true`, `local_source`) | `cameras.ocr.source: {type: device, path}` |
 | `cameras[0].settings.*` (resolution, flash, capture, night, …) | `cameras.ocr.settings.*` (project) |
 | `cameras[1].rtsp_source.{username,password,ip,port,path}` | `cameras.surveillance.source: {type: rtsp, user, password, host, port, path}` |
-| `cameras[1].settings.sn` | removed (= `node.sn`); the stream keeps its URL with `stream.name: "cam_sn_{sn}"` |
+| `cameras[1].settings.sn` | removed (= `node.sn`); the stream keeps its URL with `stream.name: "{sn}"` |
 | `cameras[1].settings.version` | `cameras.surveillance.settings.version` (project) |
 | `cameras[1].settings.resolution` / `fps` | `cameras.surveillance.capture.width` / `height` / `fps` |
 | `cameras[1].settings.timestamp_overlay.*` | `cameras.surveillance.settings.timestamp_overlay.*` (project, applied through `frame_hook`) |
@@ -376,7 +378,7 @@ cameras:
     source: {type: rtsp, host: 192.168.1.64, user: admin, password: "...", path: /Streaming/Channels/101}
     capture: {width: 1280, height: 720, fps: 10}
     stream:
-      name: "cam_sn_{sn}"              # keep the 4.x URL
+      name: "{sn}"                     # -> cam_sn_pb-00004, the 4.x URL
       bitrate: 800k
       on_demand: true
       encoder: {preset: veryfast, queue_size: 1}

@@ -36,7 +36,7 @@ uv run transformsaicore download models --config config.yaml
 
 All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses `__getattr__`-based lazy imports to defer heavy module loads (saves 50–100 MB RSS on edge devices).
 
-`mediamtx-host/` is not library code: it is the VPS deployment (docker compose + `mediamtx.yml` + demand-flag server) that pairs with `MediaMTXStreamer`'s `on_demand` mode. Its `mediamtx.yml` raises demand flags only for `live/cam_sn_*` paths (the validator warns about on-demand names without that prefix). See [mediamtx-host/README.md](mediamtx-host/README.md).
+`mediamtx-host/` is not library code: it is the VPS deployment (docker compose + `mediamtx.yml` + demand-flag server) that pairs with `MediaMTXStreamer`'s `on_demand` mode. Its `mediamtx.yml` raises demand flags only for `live/cam_sn_*` paths, which is why core fixes the `cam_sn_` prefix on every stream name (`urls.STREAM_NAME_PREFIX`). See [mediamtx-host/README.md](mediamtx-host/README.md).
 
 ### Core Modules
 
@@ -74,7 +74,8 @@ All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses
   `ConfigError(report)` iff errors; `validate_config(src)` strict/no side effects; `save_config` refuses
   invalid configs, writes `exclude_unset`; `download_models` (explicit `path` always wins)
 - `urls.py`: `build_stream_urls()` — the only place stream URLs are built (shared by `Config.stream_urls`
-  and `MediaMTXStreamer`). Stream name template `{sn} {camera} {index}`, default `cam_sn_{sn}_{camera}`
+  and `MediaMTXStreamer`). Stream name = fixed `cam_sn_` + template `{sn} {camera} {index}` (default
+  `{sn}_{camera}`); `stream_path_name()` adds the prefix once, everywhere (config, URLs, streamer ctor)
 - `example.py`: `generate_example()` → the committed `config.example.yaml` (a test keeps it fresh)
 - Derived values are properties, never written into the config: `source.url`, `config.stream_urls()`,
   `model.resolved_path`. `Config.secrets()`, `Config.masked_dump()`, `Config.schema_json()`
@@ -124,7 +125,7 @@ All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses
 
 **`mediamtx_streamer.py`** — `MediaMTXStreamer` pushes one camera's frames to MediaMTX via FFmpeg.
 - `from_camera(camera, server: MediaMTXConfig, node: NodeConfig, **overrides)`; constructor is
-  `(host, rtsp_port, stream_name, ...)` — `stream_name` is the full path name
+  `(host, rtsp_port, stream_name, ...)` — `stream_name` gets the `cam_sn_` prefix if it lacks it
 - Size/fps: `stream.*` > `capture.*`; unknown size → adopted from the first `update_frame` frame
   (FFmpeg start deferred, `_start_pending`); fps fallback `StreamConfig.DEFAULT_FPS` (15)
 - `encoder_codec`: `libx264` | `auto` (detect hardware) | an FFmpeg encoder name

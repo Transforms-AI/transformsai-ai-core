@@ -21,8 +21,9 @@ DEFAULT_DEMAND_URL = "https://{host}/demand/{name}"
 # A stream name is one MediaMTX path segment (it also names the demand flag file)
 _PATH_NAME_RE = re.compile(r"^[A-Za-z0-9_\-.~]+$")
 
-# The bundled mediamtx-host only runs on-demand for paths matching ^live/cam_sn_(.+)$
-DEMAND_NAME_PREFIX = "cam_sn_"
+# Every stream name starts with this fixed prefix: the bundled mediamtx-host only runs
+# on-demand for paths matching ^live/cam_sn_(.+)$, so a name without it could never go live.
+STREAM_NAME_PREFIX = "cam_sn_"
 
 _IPV4_RE = re.compile(r"^(\d{1,3}\.){3}\d{1,3}$")
 _IPV6_RE = re.compile(r"^\[?([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}\]?$")
@@ -63,8 +64,15 @@ def check_template(template: str, allowed: frozenset) -> str:
     return template
 
 
+def stream_path_name(name: str) -> str:
+    """`name` with the fixed 'cam_sn_' prefix, added once (an already-prefixed name is kept)."""
+    name = str(name)
+    return name if name.startswith(STREAM_NAME_PREFIX) else STREAM_NAME_PREFIX + name
+
+
 def render_stream_name(template: str, *, sn: str, camera: str, index: int) -> str:
-    return template.format(sn=sn, camera=camera, index=index)
+    """Full stream name: 'cam_sn_' + the rendered `stream.name` template."""
+    return stream_path_name(template.format(sn=sn, camera=camera, index=index))
 
 
 def is_valid_path_name(name: str) -> bool:
@@ -93,10 +101,13 @@ def build_stream_urls(
 ) -> StreamUrls:
     """Resolve the three URLs of stream ``name`` on server ``host``.
 
+    ``name`` always ends up with the fixed 'cam_sn_' prefix (added if missing).
+
     A ``None`` template means the 4.x default. Only the webrtc default depends on
     the host: a bare IP is plain HTTP on ``webrtc_port``; a hostname is assumed to
     sit behind a TLS reverse proxy (no port).
     """
+    name = stream_path_name(name)
     values = {"host": url_host(host), "rtsp_port": rtsp_port, "webrtc_port": webrtc_port, "name": name}
     if webrtc_url is None:
         webrtc_url = DEFAULT_WEBRTC_URL_IP if is_ip_address(host) else DEFAULT_WEBRTC_URL_HOSTNAME

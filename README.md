@@ -68,7 +68,7 @@ cameras:                            # a map keyed by camera name ...
   surveillance:
     source: {type: rtsp, host: 192.168.1.64, user: admin, password: "..."}
     capture: {fps: 10, width: 1280, height: 720}
-    stream: {on_demand: true}       # stream name defaults to cam_sn_{sn}_{camera}
+    stream: {on_demand: true}       # stream name: cam_sn_ + {sn}_{camera} (the default)
   ocr:
     source: {type: device, path: /dev/video0}
     settings: {flash: {pin: 17}}    # project-owned: core never looks inside
@@ -231,7 +231,7 @@ from transformsai_ai_core import MediaMTXStreamer
 
 camera = config.cameras["surveillance"]
 streamer = MediaMTXStreamer.from_camera(camera, config.mediamtx, config.node)
-# manual: MediaMTXStreamer("mediamtx.example.com", 8554, "cam_sn_pb-00004", fps=10,
+# manual: MediaMTXStreamer("mediamtx.example.com", 8554, "pb-00004", fps=10,   # -> cam_sn_pb-00004
 #   frame_width=1280, frame_height=720, bitrate="800k", encoder_codec="libx264", ...)
 
 streamer.start_streaming()
@@ -240,8 +240,10 @@ streamer.get_rtsp_url(); streamer.get_webrtc_url()
 streamer.stop_streaming()
 ```
 
-- **Stream name**: `stream.name` template with `{sn}`, `{camera}`, `{index}`; default
-  `cam_sn_{sn}_{camera}`. Names must be unique across enabled streams (a validation error otherwise).
+- **Stream name**: always the fixed prefix `cam_sn_` followed by the `stream.name` template (`{sn}`,
+  `{camera}`, `{index}`; default `{sn}_{camera}`), so every stream matches the VPS's `live/cam_sn_*`
+  on-demand rule. The prefix is never doubled; writing it in `stream.name` only earns a warning. Names
+  must be unique across enabled streams (a validation error otherwise).
 - **URLs**: `mediamtx.rtsp_url` / `webrtc_url` / `demand_url` templates (`{host}`, `{rtsp_port}`,
   `{webrtc_port}`, `{name}`); `null` keeps the 4.x URLs (WebRTC: `https://{host}/live/{name}/`, or
   `http://{host}:{webrtc_port}/live/{name}/` for a bare IP).
@@ -259,8 +261,8 @@ streamer.stop_streaming()
 (`https://{host}/demand/{name}` by default) and runs FFmpeg only while a viewer is watching, stopping it
 `mediamtx.demand.grace_period` seconds after demand ends. A failed/unreadable poll never changes state.
 Inject `demand_check=callable` for tests or other backends. **The server side needs matching setup** —
-see [mediamtx-host/README.md](mediamtx-host/README.md); its `mediamtx.yml` serves demand flags only for
-`live/cam_sn_*` paths.
+see [mediamtx-host/README.md](mediamtx-host/README.md); its `mediamtx.yml` serves demand flags for
+`live/cam_sn_*` paths, which every core stream name is.
 
 ---
 

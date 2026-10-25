@@ -1,5 +1,18 @@
 # Changelog
 
+## 5.0.1
+
+- **The `cam_sn_` stream-name prefix is fixed.** Every stream name is now `cam_sn_` followed by the
+  rendered `stream.name`, whose default changes from `cam_sn_{sn}_{camera}` to `{sn}_{camera}`, so
+  the resolved name is unchanged. The bundled `mediamtx-host` only runs on-demand for
+  `live/cam_sn_*` paths, so a custom name can no longer fall outside that rule.
+- **The prefix is never doubled.** It is added once, in the config, in the URL builder and in the
+  `MediaMTXStreamer` constructor (`"pb-00004"` → `cam_sn_pb-00004`). A `stream.name` that already
+  starts with `cam_sn_` works as before and gets a warning suggesting the shorter form.
+- **Upgrading from 5.0.0:** change `stream.name: "cam_sn_{sn}"` to `"{sn}"`. The old form keeps
+  working, but the validator warns about it.
+- **Removed:** the 5.0.0 warning about on-demand names without the prefix, which can no longer happen.
+
 ## 5.0.0
 
 The config system is reworked. **Breaking:** 4.x configs and 4.x `from_config`
@@ -60,7 +73,7 @@ calls no longer load. See [MIGRATION-5.0.md](MIGRATION-5.0.md).
 - **`MediaMTXStreamer`.**
   - New `from_camera(camera, server, node, **overrides)`.
   - The stream name comes from the `stream.name` template (`{sn}`, `{camera}`,
-    `{index}`; default `cam_sn_{sn}_{camera}`).
+    `{index}`; default `cam_sn_{sn}_{camera}`; in 5.0.1 the `cam_sn_` prefix became fixed).
   - The size and fps come from the stream or the camera's capture. An unknown size
     is adopted from the first frame.
   - `webrtc_port` is honoured, and the URL templates come from `mediamtx`.

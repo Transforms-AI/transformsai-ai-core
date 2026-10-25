@@ -269,7 +269,7 @@ class TestCommandLine(unittest.TestCase):
             "cameras": {"cam": {
                 "source": {"type": "rtsp", "host": "10.0.0.5"},
                 "capture": {"fps": 15, "width": 640, "height": 480},
-                "stream": {"name": "cam_sn_{sn}", "bitrate": "800k"},
+                "stream": {"name": "{sn}", "bitrate": "800k"},
             }},
             "mediamtx": {"host": "vps.example.com"},
         })
@@ -287,7 +287,7 @@ class TestCommandLine(unittest.TestCase):
         }
         camera = {
             "capture": {"fps": 15, "width": 640, "height": 480},
-            "stream": {"name": "cam_sn_{sn}", "bitrate": "800k"},
+            "stream": {"name": "{sn}", "bitrate": "800k"},
         }
         alsa = {**camera, "source": {"type": "device", "index": 0},
                 "stream": {**camera["stream"], "audio": {"input": {"type": "alsa", "device": "inmp441"}}}}

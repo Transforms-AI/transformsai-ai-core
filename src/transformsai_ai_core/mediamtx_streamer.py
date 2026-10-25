@@ -13,7 +13,7 @@ from collections import deque
 from .central_logger import get_logger
 from .config.schema import AUDIO_INPUT_TYPES, StreamConfig
 from .config.types import format_bitrate, parse_bitrate
-from .config.urls import build_stream_urls
+from .config.urls import build_stream_urls, stream_path_name
 from .video_capture import _Backoff
 
 # --- Information About Script ---
@@ -98,7 +98,8 @@ class MediaMTXStreamer:
         self.host = host
         self.rtsp_port = rtsp_port
         self.webrtc_port = webrtc_port
-        self.stream_name = stream_name
+        # Always 'cam_sn_' + name (added once): the VPS only serves cam_sn_* paths on demand
+        self.stream_name = stream_name = stream_path_name(stream_name)
         self.fps = fps or StreamConfig.DEFAULT_FPS
         # None = adopt the size of the first frame pushed
         self.frame_width = frame_width
