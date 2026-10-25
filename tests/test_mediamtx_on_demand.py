@@ -56,9 +56,9 @@ class OnDemandTestCase(unittest.TestCase):
     def make_streamer(self, demand_check, poll_interval=0.05, grace_period=0.2,
                       **kwargs):
         s = MediaMTXStreamer(
-            mediamtx_ip="vps.example.com",
+            host="vps.example.com",
             rtsp_port=8554,
-            camera_sn_id="testcam",
+            stream_name="cam_sn_testcam",
             on_demand=True,
             demand_poll_interval=poll_interval,
             demand_grace_period=grace_period,
@@ -218,9 +218,9 @@ class TestCheckDemandParsing(OnDemandTestCase):
         self.streamer = None
         s2 = self.make_streamer(
             demand_check=lambda: False,
-            demand_url="http://10.0.0.1:8080/flags/{camera_sn_id}",
+            demand_url="http://10.0.0.1:8080/flags/{name}",
         )
-        self.assertEqual(s2._demand_url, "http://10.0.0.1:8080/flags/testcam")
+        self.assertEqual(s2._demand_url, "http://10.0.0.1:8080/flags/cam_sn_testcam")
         self.streamer = None
 
 

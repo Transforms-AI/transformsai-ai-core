@@ -4,6 +4,7 @@ import time
 import os
 import random
 from .central_logger import get_logger
+from .redact import redact
 
 # --- Information About Script ---
 __name__ = "VideoCaptureAsync"
@@ -74,37 +75,20 @@ class VideoCaptureAsync:
     _FFMPEG_ENV_KEY = "OPENCV_FFMPEG_CAPTURE_OPTIONS"
     _env_lock = threading.Lock()  # OPENCV_FFMPEG_CAPTURE_OPTIONS is process-global
 
-    # capture.restart.<key> -> __init__ kwarg
-    _RESTART_KEY_MAP = {
-        "enabled": "auto_restart_on_fail",
-        "delay": "restart_delay",
-        "backoff_start": "restart_backoff_start",
-        "backoff_jitter": "restart_backoff_jitter",
-        "reset_after": "restart_reset_after",
-        "max_attempts": "max_restart_attempts",
-        "stall_timeout": "stall_timeout",
-    }
+    # config source.kind -> internal source class
+    _SOURCE_KINDS = {"device": "USB", "file": "FILE", "network": "NETWORK"}
 
-    # capture.timestamp.<key> -> hide_camera_timestamp_and_add_current_time kwarg
-    _TIMESTAMP_KEY_MAP = {
-        "rect_ratios": "camera_ts_rect_ratios",
-        "rect_coords": "camera_ts_rect_coords",
-        "hide_color": "hide_rect_color",
-        "font_color": "new_ts_font_color",
-        "font_scale": "new_ts_font_scale",
-        "time_format": "time_format",
-    }
+    # A failing frame_hook is logged on its first failure, then at most this often
+    _HOOK_ERROR_LOG_INTERVAL = 60.0
 
     def __init__(
         self,
         src=0,
         width=None,
         height=None,
-        driver=None,
         auto_restart_on_fail=True,
         restart_delay=30.0,
         buffer_size=1,
-        opencv_backend="auto",
         max_frame_age_ms=None,
         auto_resize=True,
         hw_decode=False,
@@ -119,30 +103,43 @@ class VideoCaptureAsync:
         ffmpeg_options=None,
         health_log_interval=60.0,
         on_state_change=None,
-        timestamp_overlay=False,
-        timestamp_overlay_options=None,
+        frame_hook=None,
+        source_type=None,
+        loop=None,
     ):
+        """
+        Args (beyond the capture options documented on CaptureConfig):
+            frame_hook: optional ``Callable[[ndarray], ndarray | None]`` run on the
+                capture thread on every published frame (return None = modified in
+                place). Exceptions are caught and logged; the frame is then
+                published unhooked, so a hook can never stop capture.
+            source_type: "device" | "file" | "network" to skip auto-detection (a
+                udev symlink or an unusual file extension detects as unknown).
+            loop: restart file sources at end of file (default True for files).
+        """
         # Cast string integers to actual ints for proper USB detection
         self.src = int(src) if isinstance(src, str) and src.isdigit() else src
+        # Log-safe name for the source: never print a URL's password
+        self._label = redact(str(self.src))
         self.width = width
         self.height = height
         self.target_fps = fps
         self.auto_resize = auto_resize
         self.hw_decode = hw_decode
-        self.driver = driver
 
         # FPS control
         self._min_frame_time = 1.0 / self.target_fps if self.target_fps else 0
         self._last_retrieved_time = 0
 
-        self.source_type = self._detect_source_type(self.src)
+        if source_type is not None and source_type not in self._SOURCE_KINDS:
+            raise ValueError(f"source_type must be one of {sorted(self._SOURCE_KINDS)} or None, got {source_type!r}")
+        self.source_type = self._SOURCE_KINDS[source_type] if source_type else self._detect_source_type(self.src)
         self._is_file_source = (self.source_type == 'FILE')
-        self.loop = True if self._is_file_source else False
+        self.loop = (True if loop is None else bool(loop)) if self._is_file_source else False
 
         self.auto_restart_on_fail = auto_restart_on_fail
         self.restart_delay = restart_delay
         self.buffer_size = buffer_size
-        self.opencv_backend = opencv_backend
         self.max_frame_age_ms = max_frame_age_ms
 
         # Reconnect policy
@@ -158,13 +155,10 @@ class VideoCaptureAsync:
         self.on_state_change = on_state_change
         self._backoff = _Backoff(restart_backoff_start, restart_delay, restart_backoff_jitter)
 
-        # Optional OSD timestamp-overwrite overlay (applied once, in the capture thread).
-        # Drop None-valued options so the util's own defaults apply for anything unset.
-        self._timestamp_overlay = bool(timestamp_overlay)
-        self._ts_overlay_options = {
-            k: v for k, v in (timestamp_overlay_options or {}).items() if v is not None
-        }
-        self._ts_overlay_failures = 0
+        # Optional per-frame hook (run once, in the capture thread)
+        self.frame_hook = frame_hook
+        self._hook_errors = 0
+        self._hook_last_log = 0.0
 
         # State variables
         self.cap = None
@@ -212,7 +206,7 @@ class VideoCaptureAsync:
                 raise
             else:
                 self._note_error(e)
-                self.logger.warning(f"[{self.src}] Initial capture failed: {e}. Will retry in thread.")
+                self.logger.warning(f"[{self._label}] Initial capture failed: {e}. Will retry in thread.")
 
     @property
     def frame_id(self):
@@ -262,7 +256,7 @@ class VideoCaptureAsync:
             try:
                 cap.release()
             except Exception as e:
-                self.logger.debug(f"[{self.src}] Handle release raised: {e}")
+                self.logger.debug(f"[{self._label}] Handle release raised: {e}")
 
     def _has_handle(self):
         with self._cap_lock:
@@ -320,7 +314,7 @@ class VideoCaptureAsync:
                 cap = self._open_capture(cv2.CAP_V4L2)
                 if not cap.isOpened():
                     cap.release()
-                    raise RuntimeError(f"Could not open USB source: {self.src}")
+                    raise RuntimeError(f"Could not open USB source: {self._label}")
 
                 # Strict Order: FOURCC -> Width/Height -> FPS -> Buffer
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
@@ -341,7 +335,7 @@ class VideoCaptureAsync:
                 cap = self._open_capture(backend)
                 if not cap.isOpened():
                     cap.release()
-                    raise RuntimeError(f"Could not open source: {self.src}")
+                    raise RuntimeError(f"Could not open source: {self._label}")
                 if self.buffer_size is not None:
                     cap.set(cv2.CAP_PROP_BUFFERSIZE, self.buffer_size)
 
@@ -365,7 +359,7 @@ class VideoCaptureAsync:
             self._last_new_frame_mono = now  # start the stall clock at connect
             self._ever_connected = True
 
-            self.logger.info(f"[{self.src}] Initialized {self.source_type} source (FPS: {self._fps:.2f})")
+            self.logger.info(f"[{self._label}] Initialized {self.source_type} source (FPS: {self._fps:.2f})")
 
     def get_height_width(self):
         with self._cap_lock:
@@ -387,7 +381,7 @@ class VideoCaptureAsync:
     def _attempt_restart_capture(self):
         """Single restart attempt. Kept for backwards compatibility — the supervised
         loop uses _connect()/_schedule_retry() so the backoff policy is applied."""
-        self.logger.info(f"[{self.src}] Attempting to restart capture...")
+        self.logger.info(f"[{self._label}] Attempting to restart capture...")
         try:
             self._initialize_capture()
             if self._has_handle():
@@ -397,7 +391,7 @@ class VideoCaptureAsync:
                 return True
         except Exception as e:
             self._note_error(e)
-            self.logger.error(f"[{self.src}] Restart failed: {e}")
+            self.logger.error(f"[{self._label}] Restart failed: {e}")
         return False
 
     def start(self, loop=None):
@@ -407,7 +401,7 @@ class VideoCaptureAsync:
             # A previous thread is still wedged inside OpenCV and owns the old handle.
             # Starting a second thread would let it release a handle that thread is using.
             raise RuntimeError(
-                f"[{self.src}] previous capture thread was abandoned mid-call — "
+                f"[{self._label}] previous capture thread was abandoned mid-call — "
                 "construct a new VideoCaptureAsync instead of restarting this one"
             )
         if loop is not None and self._is_file_source:
@@ -417,7 +411,7 @@ class VideoCaptureAsync:
         self._stop_event.clear()
         self._backoff.reset()
         self._last_health_log = 0.0
-        self._thread = threading.Thread(target=self._update, name=f"VideoCaptureAsync_{self.src}", daemon=True)
+        self._thread = threading.Thread(target=self._update, name=f"VideoCaptureAsync_{self._label}", daemon=True)
         self._thread.start()
         return self
 
@@ -430,14 +424,14 @@ class VideoCaptureAsync:
                 return
             previous, self._state = self._state, state
 
-        self.logger.debug(f"[{self.src}] state: {previous} -> {state}")
+        self.logger.debug(f"[{self._label}] state: {previous} -> {state}")
         callback = self.on_state_change
         if callback is None:
             return
         try:
             callback(state, self.get_stats())
         except Exception as e:
-            self.logger.warning(f"[{self.src}] on_state_change callback failed: {e}")
+            self.logger.warning(f"[{self._label}] on_state_change callback failed: {e}")
 
     def _note_error(self, exc):
         self._last_error = f"{type(exc).__name__}: {exc}" if isinstance(exc, BaseException) else str(exc)
@@ -455,12 +449,12 @@ class VideoCaptureAsync:
     def _schedule_retry(self):
         """Apply the restart policy. Returns False when we should give up or are stopping."""
         if not self.auto_restart_on_fail:
-            self.logger.warning(f"[{self.src}] auto_restart_on_fail is disabled — capture thread exiting")
+            self.logger.warning(f"[{self._label}] auto_restart_on_fail is disabled — capture thread exiting")
             return False
 
         if self.max_restart_attempts is not None and self._backoff.attempts >= self.max_restart_attempts:
             self.logger.error(
-                f"[{self.src}] Giving up after {self._backoff.attempts} reconnect attempts "
+                f"[{self._label}] Giving up after {self._backoff.attempts} reconnect attempts "
                 f"(last error: {self._last_error})"
             )
             self._set_state(self.STATE_FAILED)
@@ -468,7 +462,7 @@ class VideoCaptureAsync:
 
         delay = self._backoff.next()
         self._set_state(self.STATE_RECONNECTING if self._ever_connected else self.STATE_CONNECTING)
-        self.logger.info(f"[{self.src}] Reconnecting in {delay:.1f}s (attempt {self._backoff.attempts})")
+        self.logger.info(f"[{self._label}] Reconnecting in {delay:.1f}s (attempt {self._backoff.attempts})")
         self._stop_event.wait(delay)
         return not self._stop_event.is_set()
 
@@ -485,7 +479,7 @@ class VideoCaptureAsync:
                 # traceback loguru attaches to .error(), or a camera that is down overnight
                 # buries the log in identical stacks.
                 log = self.logger.warning if isinstance(e, RuntimeError) else self.logger.error
-                log(f"[{self.src}] Connect failed: {e}")
+                log(f"[{self._label}] Connect failed: {e}")
                 if not self._schedule_retry():
                     return False
         return False
@@ -499,7 +493,7 @@ class VideoCaptureAsync:
         self.restart_count += 1
         self._restarts_since_log += 1
         log = self.logger.error if unexpected else self.logger.warning
-        log(f"[{self.src}] {exc} — restarting capture")
+        log(f"[{self._label}] {exc} — restarting capture")
 
         self._drop_handle()
         self._streaming_since = None
@@ -511,32 +505,34 @@ class VideoCaptureAsync:
 
         return self._schedule_retry()
 
-    def _apply_timestamp_overlay(self, frame):
+    def _apply_frame_hook(self, frame):
         """
-        Paint the current system time over the camera's OSD timestamp region.
+        Run the project's frame_hook on a freshly decoded frame.
 
-        Runs in the capture thread on the freshly-decoded buffer (inplace, allocation-free)
-        so every consumer inherits the corrected time from one overlay. Fail-open: a bad
-        options dict must not raise into the capture loop (that would trigger a spurious
-        reconnect), so errors are logged at most once and the original frame is published.
+        Runs in the capture thread, once per published frame, so every consumer
+        (inference, livestream, upload) sees the hooked frame. Fail-open: an
+        exception here must not reach the capture loop (that would force a
+        spurious reconnect), so it is counted, logged on the first failure and
+        then at most every _HOOK_ERROR_LOG_INTERVAL seconds, and the unhooked
+        frame is published.
         """
         try:
-            from .utils import hide_camera_timestamp_and_add_current_time
-            return hide_camera_timestamp_and_add_current_time(
-                frame, timestamp=None, inplace=True, **self._ts_overlay_options
-            )
+            result = self.frame_hook(frame)
+            return frame if result is None else result
         except Exception as e:
-            self._ts_overlay_failures += 1
-            if self._ts_overlay_failures == 1:
+            self._hook_errors += 1
+            now = time.monotonic()
+            if self._hook_errors == 1 or (now - self._hook_last_log) >= self._HOOK_ERROR_LOG_INTERVAL:
+                self._hook_last_log = now
                 self.logger.error(
-                    f"[{self.src}] timestamp overlay failed ({e}); publishing un-stamped "
-                    "frames (this is logged once)"
+                    f"[{self._label}] frame_hook failed ({type(e).__name__}: {e}); publishing the "
+                    f"unhooked frame ({self._hook_errors} failure(s) so far)"
                 )
             return frame
 
     def _publish_frame(self, frame):
-        if self._timestamp_overlay and frame is not None:
-            frame = self._apply_timestamp_overlay(frame)
+        if self.frame_hook is not None and frame is not None:
+            frame = self._apply_frame_hook(frame)
 
         now = time.monotonic()
         self._last_new_frame_mono = now
@@ -644,7 +640,7 @@ class VideoCaptureAsync:
 
         stats = self.get_stats()
         message = (
-            f"[{self.src}] health: state={stats['state']} fps={stats['measured_fps']:.1f} "
+            f"[{self._label}] health: state={stats['state']} fps={stats['measured_fps']:.1f} "
             f"frames={stats['total_frames']} restarts={stats['restart_count']} "
             f"uptime={stats['uptime_seconds']:.0f}s"
         )
@@ -746,7 +742,7 @@ class VideoCaptureAsync:
         now = time.monotonic()
         last_frame_age_ms = (time.time() - self._frame_timestamp) * 1000 if self._frame_timestamp else None
         return {
-            'src': self.src,
+            'src': self._label,
             'source_type': self.source_type,
             'state': self._state,
             'is_healthy': self.is_healthy,
@@ -766,6 +762,7 @@ class VideoCaptureAsync:
             'source_fps': self._fps,
             'measured_fps': self._measured_fps,
             'orphaned_threads': self._orphaned_threads,
+            'hook_errors': self._hook_errors,
         }
 
     def stop(self):
@@ -791,7 +788,7 @@ class VideoCaptureAsync:
                 self._orphaned = True
                 self._orphaned_threads += 1
                 self.logger.warning(
-                    f"[{self.src}] Capture thread still wedged in OpenCV after {join_timeout:.1f}s; "
+                    f"[{self._label}] Capture thread still wedged in OpenCV after {join_timeout:.1f}s; "
                     "abandoning the handle (the daemon thread will release it)"
                 )
                 self.started = False
@@ -808,54 +805,39 @@ class VideoCaptureAsync:
         self.release()
 
     @classmethod
-    def from_config(cls, cfg, **overrides):
-        from .config_loader import build_rtsp_url, init_kwargs
-        if hasattr(cfg, "model_dump"):
-            cfg = cfg.model_dump()
-        else:
-            cfg = dict(cfg)
+    def from_camera(cls, camera, **overrides):
+        """
+        Build a capture from a typed ``CameraConfig`` (``config.cameras["name"]``).
 
-        if cfg.get("local", False):
-            src = cfg.get("local_source", "")
-        else:
-            src = cfg.get("rtsp_url")
-            if not src:
-                src = build_rtsp_url(cfg.get("rtsp_source", {}))
-
-        capture_cfg = dict(cfg.get("capture", {}) or {})
-
-        restart_cfg = capture_cfg.pop("restart", None) or {}
-        if hasattr(restart_cfg, "model_dump"):
-            restart_cfg = restart_cfg.model_dump()
-
-        # Legacy flat keys first; the nested restart block wins where both are set.
-        restart_kwargs = {}
-        for legacy in ("auto_restart_on_fail", "restart_delay"):
-            value = capture_cfg.pop(legacy, None)
-            if value is not None:
-                restart_kwargs[legacy] = value
-        for key, value in restart_cfg.items():
-            if key in cls._RESTART_KEY_MAP and value is not None:
-                restart_kwargs[cls._RESTART_KEY_MAP[key]] = value
-        restart_kwargs.update(restart_cfg.get("extras", {}) or {})
-
-        # Optional timestamp-overwrite overlay: flatten the nested block into the
-        # timestamp_overlay flag + a mapped options dict passed to the util.
-        timestamp_cfg = capture_cfg.pop("timestamp", None) or {}
-        if hasattr(timestamp_cfg, "model_dump"):
-            timestamp_cfg = timestamp_cfg.model_dump()
-        timestamp_kwargs = {}
-        if timestamp_cfg:
-            ts_options = {}
-            for key, value in timestamp_cfg.items():
-                if key in cls._TIMESTAMP_KEY_MAP and value is not None:
-                    ts_options[cls._TIMESTAMP_KEY_MAP[key]] = value
-            ts_options.update(timestamp_cfg.get("extras", {}) or {})
-            timestamp_kwargs = {
-                "timestamp_overlay": bool(timestamp_cfg.get("enabled", False)),
-                "timestamp_overlay_options": ts_options,
-            }
-
-        kwargs: dict = {"src": src, **capture_cfg, **restart_kwargs, **timestamp_kwargs}
-        kwargs = {**cfg.get("extras", {}), **kwargs, **overrides}
-        return cls(**init_kwargs(cls, kwargs))
+        Every value comes from the config model, so its defaults are the only
+        defaults; `overrides` (any __init__ kwarg, e.g. ``frame_hook=`` or
+        ``on_state_change=``) win over the config.
+        """
+        source, capture = camera.source, camera.capture
+        restart = capture.restart
+        kwargs = {
+            "src": source.target,
+            "source_type": source.kind,
+            "width": capture.width,
+            "height": capture.height,
+            "fps": capture.fps,
+            "buffer_size": capture.buffer_size,
+            "max_frame_age_ms": capture.max_frame_age * 1000 if capture.max_frame_age else None,
+            "auto_resize": capture.auto_resize,
+            "hw_decode": capture.hw_decode,
+            "open_timeout": capture.open_timeout,
+            "ffmpeg_options": capture.ffmpeg_options,
+            "health_log_interval": capture.health_log_interval,
+            "auto_restart_on_fail": restart.enabled,
+            "restart_delay": restart.delay,
+            "restart_backoff_start": restart.backoff_start,
+            "restart_backoff_jitter": restart.jitter,
+            "restart_reset_after": restart.reset_after,
+            "max_restart_attempts": restart.max_attempts,
+            "stall_timeout": restart.stall_timeout,
+            "rtsp_transport": getattr(source, "transport", None),
+        }
+        if source.kind == "file":
+            kwargs["loop"] = source.loop
+        kwargs.update(overrides)
+        return cls(**kwargs)

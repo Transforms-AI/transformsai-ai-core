@@ -1,13 +1,13 @@
 import os
-import sys
 import json
-import glob
 import unittest
 import io
 from contextlib import redirect_stderr
 from datetime import datetime
 from pathlib import Path
 import transformsai_ai_core.central_logger as cv_logger
+from transformsai_ai_core.config import LoggingConfig
+from transformsai_ai_core.redact import clear_secrets
 from loguru import logger
 
 
@@ -16,12 +16,18 @@ class TestCentralLogger(unittest.TestCase):
     def setUp(self):
         cv_logger._is_configured = False
         cv_logger._run_id = None
-        cv_logger._cli_sink_level = "INFO"
-        cv_logger._file_sink_level = "DEBUG"
+        cv_logger._console_level = "INFO"
+        cv_logger._file_level = "DEBUG"
+        cv_logger._core_sink_ids.clear()
+        cv_logger._patchers.clear()
+        clear_secrets()
         logger.remove()
 
     def tearDown(self):
         logger.remove()
+        cv_logger._core_sink_ids.clear()
+        cv_logger._patchers.clear()
+        clear_secrets()
         # Clean up all log files in .core-logs directory
         if os.path.exists(".core-logs"):
             for root, dirs, files in os.walk(".core-logs", topdown=False):
@@ -118,7 +124,7 @@ class TestCentralLogger(unittest.TestCase):
         log = cv_logger.get_logger()
         log.info("Testing blind name")
         logs = self._read_jsonl_logs()
-        self.assertIn(logs[0]['logger_name'], ['test_logger', '__main__'])
+        self.assertIn(logs[0]['logger_name'], ['test_logger', 'tests.test_logger', '__main__'])
 
     def test_explicit_naming(self):
         """Test explicit logger name assignment."""
@@ -127,34 +133,106 @@ class TestCentralLogger(unittest.TestCase):
         logs = self._read_jsonl_logs()
         self.assertEqual(logs[0]['logger_name'], "DataAugmentationWorker")
 
-    def test_cli_sink_level_info(self):
-        """Test that TRACE and DEBUG are not shown at console with INFO level."""
+    def capture_console(self, fn):
         stderr_capture = io.StringIO()
         with redirect_stderr(stderr_capture):
-            log = cv_logger.get_logger(cli_sink_level="INFO")
+            fn()
+            logger.complete()
+        return stderr_capture.getvalue()
+
+    def test_console_level_info(self):
+        """TRACE and DEBUG are not shown at console with INFO level; the file gets DEBUG."""
+        def run():
+            cv_logger.configure_logging(console_level="INFO")
+            log = cv_logger.get_logger()
             log.trace("This is a trace")
             log.debug("This is a debug")
             log.info("This is an info")
-            logger.complete()
 
-        console_output = stderr_capture.getvalue()
+        console_output = self.capture_console(run)
         self.assertIn("This is an info", console_output)
         self.assertNotIn("This is a debug", console_output)
-        
+
         logs = self._read_jsonl_logs()
         self.assertEqual(len(logs), 2)
         self.assertEqual(logs[0]['level'], "DEBUG")
 
-    def test_cli_sink_level_debug(self):
-        """Test that DEBUG is shown at console with DEBUG level."""
-        stderr_capture = io.StringIO()
-        with redirect_stderr(stderr_capture):
-            log = cv_logger.get_logger(cli_sink_level="DEBUG")
-            log.debug("This is a debug")
-            logger.complete()
+    def test_console_level_debug_from_config(self):
+        def run():
+            cv_logger.configure_logging(LoggingConfig(console_level="DEBUG"))
+            cv_logger.get_logger().debug("This is a debug")
 
-        console_output = stderr_capture.getvalue()
-        self.assertIn("This is a debug", console_output)
+        self.assertIn("This is a debug", self.capture_console(run))
+
+    def test_off_disables_a_sink(self):
+        def run():
+            cv_logger.configure_logging(LoggingConfig(console_level="OFF", file_level="INFO"))
+            cv_logger.get_logger().warning("quiet console")
+
+        self.assertEqual(self.capture_console(run), "")
+        self.assertEqual(self._read_jsonl_logs()[0]["message"], "quiet console")
+        cv_logger.configure_logging(file_level=None)
+        self.assertEqual(len(cv_logger._core_sink_ids), 0)
+
+    def test_configure_logging_leaves_project_sinks_alone(self):
+        cv_logger.configure_logging(console_level="OFF")
+        seen = []
+        logger.add(lambda m: seen.append(m.record["message"]), level="INFO")
+        cv_logger.configure_logging(console_level="OFF", file_level="WARNING")  # reconfigure later
+        cv_logger.configure_logging(LoggingConfig(console_level="OFF"))
+        cv_logger.get_logger().info("to the project sink")
+        logger.complete()
+        self.assertEqual(seen, ["to the project sink"])
+        self.assertEqual(len(cv_logger._core_sink_ids), 1)
+
+    def test_patcher_scrubs_message_and_extra(self):
+        cv_logger.configure_logging(console_level="OFF", secrets=["literal-secret"])
+        seen = []
+        logger.add(lambda m: seen.append(m.record), level="INFO")
+        cv_logger.get_logger().bind(source="rtsp://admin:pw9876@10.0.0.5/s").info(
+            "opening rtsp://admin:pw9876@10.0.0.5/s with literal-secret")
+        logger.complete()
+        self.assertEqual(seen[0]["message"], "opening rtsp://admin:***@10.0.0.5/s with ***")
+        self.assertEqual(seen[0]["extra"]["source"], "rtsp://admin:***@10.0.0.5/s")
+        payload = self._read_jsonl_logs()[0]
+        self.assertNotIn("pw9876", json.dumps(payload))
+        self.assertNotIn("literal-secret", json.dumps(payload))
+
+    def test_tracebacks_scrubbed_in_core_sinks(self):
+        def run():
+            cv_logger.configure_logging(console_level="INFO", secrets=["tb-secret-1"])
+            try:
+                raise RuntimeError("cannot open rtsp://admin:tb-secret-1@cam/s")
+            except RuntimeError:
+                cv_logger.get_logger().error("capture failed")
+
+        console = self.capture_console(run)
+        self.assertIn("capture failed", console)
+        self.assertNotIn("tb-secret-1", console)
+        payload = self._read_jsonl_logs()[0]
+        self.assertIn("RuntimeError", payload["exception"])
+        self.assertNotIn("tb-secret-1", payload["exception"])
+
+    def test_add_patcher_chains_after_redaction(self):
+        cv_logger.configure_logging(console_level="OFF")
+        cv_logger.add_patcher(lambda record: record["extra"].update(tagged=True))
+        seen = []
+        logger.add(lambda m: seen.append(m.record["extra"].get("tagged")), level="INFO")
+        cv_logger.get_logger().info("x")
+        logger.complete()
+        self.assertEqual(seen, [True])
+
+    def test_redacting_sink_wrapper(self):
+        cv_logger.configure_logging(console_level="OFF", file_level="OFF")
+        out = io.StringIO()
+        logger.add(cv_logger.redacting_sink(out), level="INFO", format="{message}")
+        try:
+            raise ValueError("token rtsp://u:wrapped-pw@h/s")
+        except ValueError:
+            logger.exception("boom")
+        logger.complete()
+        self.assertIn("boom", out.getvalue())
+        self.assertNotIn("wrapped-pw", out.getvalue())
 
     def test_json_format(self):
         """Test that log entries have correct JSON structure."""

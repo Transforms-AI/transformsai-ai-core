@@ -11,70 +11,135 @@ import queue
 from threading import Lock
 from collections import deque
 from .central_logger import get_logger
+from .config.schema import AUDIO_INPUT_TYPES, StreamConfig
+from .config.types import format_bitrate, parse_bitrate
+from .config.urls import build_stream_urls
 from .video_capture import _Backoff
 
 # --- Information About Script ---
 __name__ = "Streamer for MediaMTX Server"
 __author__ = "TransformsAI"
 
+# `audio_highpass_hz` / `audio_gain_db` value meaning "the audio input type's default"
+AUTO = "auto"
+
+
+def _num(value):
+    """A number as FFmpeg should see it: 20.0 -> '20', 12.5 -> '12.5'."""
+    value = float(value)
+    return str(int(value)) if value.is_integer() else str(value)
+
+
+def _frames(value):
+    """A frame count (GOP length) from a possibly fractional fps product."""
+    return str(max(1, int(round(float(value)))))
+
+
+def build_audio_filter(audio_input, *, channel=0, highpass_hz=None, gain_db=0.0, limiter=0.97):
+    """The -af chain, in a fixed order: channel select (alsa) -> high-pass -> gain -> limiter -> resample.
+
+    highpass_hz: falsy = off; up to 20 Hz a single 2-pole stage (the MEMS DC-offset
+    filter of 4.x); above 20 Hz two cascaded 2-pole stages (4th order: a single
+    2nd-order stage was measured too gentle for hum/rumble). gain_db: falsy = no
+    volume stage and no limiter. limiter: None = gain without a limiter.
+    """
+    stages = []
+    if audio_input == "alsa":
+        # Mic channel select: a stereo I2S MEMS mic carries one live channel
+        stages.append(f"pan=mono|c0=c{int(channel)}")
+    # Camera audio arrives mono with the camera's own AGC, so by default it gets
+    # no channel select/high-pass -- only what the config asks for.
+    if highpass_hz:
+        cutoff = _num(highpass_hz)
+        if float(highpass_hz) > 20:
+            stages += [f"highpass=f={cutoff}:poles=2"] * 2
+        else:
+            stages.append(f"highpass=f={cutoff}")
+    if gain_db:
+        # Fixed makeup gain through a limiter (raw MEMS audio is near-inaudible)
+        stages.append(f"volume={float(gain_db)}dB")
+        if limiter:
+            stages.append(f"alimiter=limit={limiter}:level=false")
+    # The async resampler snaps samples onto the wallclock
+    # timestamps by stretching/padding up to 1000 samples/s: raw
+    # capture stamps jitter 10-20ms backward ("Non-monotonous
+    # DTS") and WebRTC receivers punish that with audible
+    # dropouts. Output lands at 48kHz because Opus over RTP is
+    # ALWAYS clocked at 48kHz (RFC 7587) -- encoding at the
+    # capture rate puts receivers on a stretched timeline.
+    stages.append("aresample=48000:async=1000")
+    return ",".join(stages)
+
+
 class MediaMTXStreamer:
     """
-    MediaMTX streamer with improved diagnostics and stream information.
+    Pushes one camera's frames to a MediaMTX server through FFmpeg.
+
+    Build it from config with ``MediaMTXStreamer.from_camera(camera, config.mediamtx,
+    config.node)``. Frame size may be left unset: it is then taken from the first
+    frame passed to ``update_frame`` (FFmpeg starts once it is known).
     """
 
     # How long FFmpeg must stay up after launch to count as started
     _start_check_s = 2.0
 
-    def __init__(self, mediamtx_ip, rtsp_port, camera_sn_id, fps=30,
-                 frame_width=1920, frame_height=1080, bitrate="1500k",
+    def __init__(self, host, rtsp_port, stream_name, fps=None,
+                 frame_width=None, frame_height=None, bitrate="1500k",
                  debug_log_interval=60.0, encoder_preset="ultrafast",
-                 encoder_codec="copy", stream_queue_size=2, hw_encode=False,
-                 on_demand=False, demand_url="", demand_poll_interval=3.0,
+                 encoder_codec="libx264", stream_queue_size=2,
+                 on_demand=False, demand_poll_interval=3.0,
                  demand_grace_period=10.0, demand_timeout=5.0, demand_check=None,
-                 audio_device=None, audio_rate=16000, audio_channels=2,
-                 audio_map_channel=0, audio_gain_db=18.0, audio_bitrate="24k",
-                 audio_source="alsa", audio_url="", audio_retry_backoff=60.0,
+                 webrtc_port=8889, rtsp_url=None, webrtc_url=None, demand_url=None,
+                 audio_input=None, audio_device=None, audio_url="", audio_transport="tcp",
+                 audio_rate=16000, audio_channels=2, audio_channel=0,
+                 audio_highpass_hz=AUTO, audio_gain_db=AUTO, audio_limiter=0.97,
+                 audio_bitrate="24k", audio_retry_backoff=60.0,
                  audio_retry_backoff_max=900.0, audio_reset_after=60.0):
-        self.mediamtx_ip = mediamtx_ip
+        self.host = host
         self.rtsp_port = rtsp_port
-        self.camera_sn_id = camera_sn_id
-        self.fps = fps
+        self.webrtc_port = webrtc_port
+        self.stream_name = stream_name
+        self.fps = fps or StreamConfig.DEFAULT_FPS
+        # None = adopt the size of the first frame pushed
         self.frame_width = frame_width
         self.frame_height = frame_height
-        self.bitrate = bitrate
-        self.webrtc_port = 8889  # Default MediaMTX WebRTC port
+        self.bitrate = format_bitrate(parse_bitrate(bitrate))
 
         # Encoder settings for resource optimization
         self.encoder_preset = encoder_preset  # ultrafast, fast, medium, etc.
-        self.encoder_codec = encoder_codec  # 'copy' to avoid re-encoding, or 'libx264'
-        self.hw_encode = hw_encode  # Auto-detect hardware encoder if True
+        self.encoder_codec = encoder_codec  # libx264, 'auto' (detect hardware), or an FFmpeg encoder name
         self.stream_queue_size = stream_queue_size  # Async queue depth
 
         # On-demand publishing: gate the FFmpeg push on viewer demand
         self.on_demand = on_demand
-        self.demand_url = demand_url
         self.demand_poll_interval = demand_poll_interval
         self.demand_grace_period = demand_grace_period
         self.demand_timeout = demand_timeout
         self.demand_check = demand_check  # optional Callable[[], bool] override
 
-        # Optional live microphone track, captured by FFmpeg itself from ALSA.
-        # audio_device should be a dsnoop/plug PCM when anything else (e.g. a
-        # recorder service) captures the same mic -- a bare hw: device admits
-        # only one client. Opus is used on the wire: it is the one codec the
-        # WebRTC playback path accepts, and mediamtx passes it through to HLS.
+        # Optional live audio track, captured by FFmpeg itself. 'alsa' = a
+        # local mic through the sound system: audio_device should be a
+        # dsnoop/plug PCM when anything else (e.g. a recorder service)
+        # captures the same mic -- a bare hw: device admits only one client.
+        # 'camera' = the audio track of the camera's own stream (audio_url).
+        # Opus is used on the wire: it is the one codec the WebRTC playback
+        # path accepts, and mediamtx passes it through to HLS.
+        if audio_input is None:
+            audio_input = "camera" if audio_url else ("alsa" if audio_device else None)
+        if audio_input is not None and audio_input not in AUDIO_INPUT_TYPES:
+            raise ValueError(f"audio_input must be one of {sorted(AUDIO_INPUT_TYPES)} or None, got {audio_input!r}")
+        self.audio_input = audio_input
         self.audio_device = audio_device or None
+        self.audio_url = audio_url or ""
+        self.audio_transport = audio_transport
         self.audio_rate = audio_rate
         self.audio_channels = audio_channels
-        self.audio_map_channel = audio_map_channel  # 0 = left (INMP441 L/R->GND)
-        self.audio_gain_db = audio_gain_db
-        self.audio_bitrate = audio_bitrate
-        # 'alsa' = a local mic through the sound system; 'rtsp' = the audio
-        # track of another RTSP source, typically the IP camera's built-in
-        # mic. With 'rtsp' set, audio_url is the source and audio_device is
-        # ignored (audio is considered enabled when either is set).
-        self.audio_source = (audio_source or "alsa").lower()
-        self.audio_url = audio_url or ""
+        self.audio_channel = audio_channel  # 0 = left (INMP441 L/R->GND)
+        defaults = AUDIO_INPUT_TYPES[audio_input].filter_defaults if audio_input else {}
+        self.audio_highpass_hz = defaults.get("highpass_hz") if audio_highpass_hz == AUTO else audio_highpass_hz
+        self.audio_gain_db = defaults.get("gain_db", 0.0) if audio_gain_db == AUTO else (audio_gain_db or 0.0)
+        self.audio_limiter = audio_limiter
+        self.audio_bitrate = format_bitrate(parse_bitrate(audio_bitrate))
 
         # Audio is best-effort, video is not: when FFmpeg can't open (or
         # loses) the audio input, the stream goes on video-only and audio is
@@ -92,9 +157,11 @@ class MediaMTXStreamer:
         # Setup logging using central logger
         self.logger = get_logger(self)
 
-        # Build URLs using helper methods
-        self.rtsp_url = self._build_rtsp_url()
-        self._demand_url = self._build_demand_url()
+        # The one URL builder shared with Config.stream_urls()
+        self.urls = build_stream_urls(host, stream_name, rtsp_port=rtsp_port, webrtc_port=webrtc_port,
+                                      rtsp_url=rtsp_url, webrtc_url=webrtc_url, demand_url=demand_url)
+        self.rtsp_url = self.urls.rtsp
+        self._demand_url = self.urls.demand
 
         # Demand supervisor state
         self._demand_thread = None
@@ -106,6 +173,7 @@ class MediaMTXStreamer:
         self.ffmpeg_process = None
         self.ffmpeg_log_file = None  # Track log file for cleanup
         self.is_streaming = False
+        self._start_pending = False  # start requested before the frame size was known
         self.frame_lock = Lock()
         self.restart_count = 0
         self.last_restart_time = 0
@@ -140,44 +208,25 @@ class MediaMTXStreamer:
         # Create logs directory once at init (not per start_streaming call)
         self.logs_dir = os.path.join(os.getcwd(), '.core-streamer-logs')
         os.makedirs(self.logs_dir, exist_ok=True)
-        self._ffmpeg_log_path = os.path.join(self.logs_dir, f'ffmpeg_cam_{self.camera_sn_id}.log')
+        safe_name = re.sub(r'[^A-Za-z0-9_.-]', '_', str(stream_name))
+        self._ffmpeg_log_path = os.path.join(self.logs_dir, f'ffmpeg_{safe_name}.log')
         
-        # Detect best encoder (hardware if available, software fallback)
-        self.detected_encoder = self._detect_best_encoder() if hw_encode else 'libx264'
+        # Resolve the encoder: 'auto' detects hardware, else the named encoder
+        self.detected_encoder = self._resolve_encoder(encoder_codec)
         
-        self.logger.info(f"[Stream] Initialized streamer for camera {self.camera_sn_id}: {self.rtsp_url}")
+        self.logger.info(f"[Stream] Initialized streamer {self.stream_name}: {self.rtsp_url}")
         self.logger.info(f"[Stream] Using encoder: {self.detected_encoder}")
-    
-    def _is_ip_address(self, host):
-        """Check if host is an IP address (IPv4 or IPv6)."""
-        # Match IPv4 pattern
-        ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
-        # Match IPv6 pattern (simplified)
-        ipv6_pattern = r'^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'
-        return bool(re.match(ipv4_pattern, host) or re.match(ipv6_pattern, host))
-    
-    def _build_rtsp_url(self):
-        """Build RTSP URL with port."""
-        return f"rtsp://{self.mediamtx_ip}:{self.rtsp_port}/live/cam_sn_{self.camera_sn_id}"
-    
-    def _build_webrtc_url(self):
-        """Build WebRTC URL with port only for IP addresses.
-        Currently it assumes, if a hostname is used, HTTPS is preferred with no port.
-        """
-        if self._is_ip_address(self.mediamtx_ip):
-            return f"http://{self.mediamtx_ip}:{self.webrtc_port}/live/cam_sn_{self.camera_sn_id}/"
-        else:
-            return f"https://{self.mediamtx_ip}/live/cam_sn_{self.camera_sn_id}/"
 
-    def _build_demand_url(self):
-        """Build the demand-flag URL polled while on_demand is enabled.
-        Derives from mediamtx_ip (same hostname/TLS/reverse-proxy as the WebRTC
-        URL); set demand_url explicitly for bare-IP / non-standard hosts.
-        """
-        if self.demand_url:
-            return self.demand_url.format(camera_sn_id=self.camera_sn_id)
-        return f"https://{self.mediamtx_ip}/demand/cam_sn_{self.camera_sn_id}"
-
+    def _resolve_encoder(self, codec):
+        codec = (codec or "libx264").strip()
+        if codec.lower() == "auto":
+            return self._detect_best_encoder()
+        if codec.lower() == "copy":
+            # Frames arrive as raw BGR: there is nothing to copy
+            self.logger.warning("[Stream] encoder codec 'copy' is not possible for raw frames; using libx264")
+            return "libx264"
+        return codec
+    
     def _detect_best_encoder(self):
         """Detect best available hardware encoder, fallback to software.
         Priority: NVIDIA > Intel QSV > AMD VAAPI > ARM V4L2M2M > Software
@@ -259,20 +308,28 @@ class MediaMTXStreamer:
     def start_streaming(self):
         """Start streaming. In on-demand mode, starts the demand supervisor
         (FFmpeg launches only when a viewer is watching); otherwise starts
-        FFmpeg immediately."""
+        FFmpeg immediately -- or, with the frame size still unknown, on the
+        first frame passed to update_frame (True is returned)."""
         if self.on_demand:
             return self._start_demand_supervisor()
-        return self._ensure_ffmpeg_started()
+        return self._ensure_ffmpeg_started() or self._start_pending
 
     def stop_streaming(self):
         """Stop the streaming process (and the demand supervisor, if any)."""
+        self._start_pending = False
         if self.on_demand:
             self._stop_demand_supervisor()
         self._ensure_ffmpeg_stopped()
 
     @property
     def _audio_configured(self):
-        return bool(self.audio_url if self.audio_source == 'rtsp' else self.audio_device)
+        if self.audio_input == 'camera':
+            return bool(self.audio_url)
+        return self.audio_input == 'alsa' and bool(self.audio_device)
+
+    @property
+    def _size_known(self):
+        return bool(self.frame_width and self.frame_height)
 
     @property
     def audio_active(self):
@@ -288,6 +345,11 @@ class MediaMTXStreamer:
         """Start FFmpeg streaming process with diagnostics."""
         if self.is_streaming:
             return True
+        if not self._size_known:
+            if not self._start_pending:
+                self.logger.info("[Stream] Frame size not set: FFmpeg starts on the first frame")
+            self._start_pending = True
+            return False
         
         current_time = time.time()
         
@@ -335,7 +397,7 @@ class MediaMTXStreamer:
                 self._writer_stop_event.clear()
                 self._writer_thread = threading.Thread(
                     target=self._frame_writer_loop,
-                    name=f"MediaMTX_Writer_{self.camera_sn_id}",
+                    name=f"MediaMTX_Writer_{self.stream_name}",
                     daemon=True
                 )
                 self._writer_thread.start()
@@ -412,7 +474,7 @@ class MediaMTXStreamer:
         `[in#1`, older builds `[alsa @`, and every version names the input
         (device or URL) when it fails to open. Output errors (`[out#0`) never
         match, so a MediaMTX outage is not blamed on audio."""
-        ident = self.audio_url if self.audio_source == 'rtsp' else self.audio_device
+        ident = self.audio_url if self.audio_input == 'camera' else self.audio_device
         for line in log.splitlines():
             if '[in#1' in line or '[alsa @' in line or (ident and ident in line):
                 return re.sub(r'^\[[^\]]*\]\s*', '', line.strip())[:200]
@@ -453,7 +515,7 @@ class MediaMTXStreamer:
             '-vcodec', 'rawvideo',
             '-pix_fmt', 'bgr24',
             '-s', f'{self.frame_width}x{self.frame_height}',
-            '-r', str(self.fps),
+            '-r', _num(self.fps),
         ]
         if audio_on:
             # Wallclock timestamps on the piped video so it shares a clock
@@ -470,13 +532,17 @@ class MediaMTXStreamer:
                 '-thread_queue_size', '32',
             ])
         ffmpeg_cmd.extend(['-i', '-'])
-        if audio_on and self.audio_source == 'rtsp':
+        if audio_on and self.audio_input == 'camera':
+            if self.audio_url.startswith('rtsp://'):
+                ffmpeg_cmd.extend([
+                    # SETUP only the audio track: without this the session
+                    # also pulls the source's video just to discard it --
+                    # wasted bandwidth and extra load on a fragile camera.
+                    '-allowed_media_types', 'audio',
+                ])
+                if self.audio_transport:
+                    ffmpeg_cmd.extend(['-rtsp_transport', self.audio_transport])
             ffmpeg_cmd.extend([
-                # SETUP only the audio track: without this the session
-                # also pulls the source's video just to discard it --
-                # wasted bandwidth and extra load on a fragile camera.
-                '-allowed_media_types', 'audio',
-                '-rtsp_transport', 'tcp',
                 # Fail fast instead of hanging: an overloaded camera can
                 # sit on the DESCRIBE for minutes; better to exit and let
                 # the demand supervisor retry than to block the publish.
@@ -523,7 +589,7 @@ class MediaMTXStreamer:
             '-profile:v', 'main',
             '-pix_fmt', 'yuv420p',
             '-b:v', self.bitrate,
-            '-g', str(self.fps),
+            '-g', _frames(self.fps),
         ])
         if audio_on:
             # VBV-cap the video so keyframes go out as a stream, not a
@@ -539,7 +605,7 @@ class MediaMTXStreamer:
             ffmpeg_cmd.extend([
                 '-maxrate', self.bitrate,
                 '-bufsize', self.bitrate,
-                '-g', str(self.fps * 4),
+                '-g', _frames(self.fps * 4),
                 # Explicit slice threads: with tune zerolatency x264 was
                 # effectively single-threaded here and 720p encode ran at
                 # 0.9x realtime -- the input backlog above was the result.
@@ -557,35 +623,11 @@ class MediaMTXStreamer:
             ffmpeg_cmd.extend([
                 '-vf', 'setpts=(RTCTIME-RTCSTART)/(TB*1000000)',
             ])
-            if self.audio_source == 'rtsp':
-                # Camera audio arrives mono with the camera's own AGC;
-                # only optional makeup gain, no channel select/highpass.
-                afilter = ""
-                if self.audio_gain_db:
-                    afilter = (
-                        f"volume={self.audio_gain_db}dB"
-                        ",alimiter=limit=0.97:level=false,"
-                    )
-            else:
-                # Mic channel select + MEMS DC-offset highpass + fixed
-                # makeup gain through a limiter (raw MEMS audio is
-                # near-inaudible).
-                afilter = (
-                    f"pan=mono|c0=c{self.audio_map_channel},highpass=f=20,"
-                )
-                if self.audio_gain_db:
-                    afilter = afilter[:-1] + (
-                        f",volume={self.audio_gain_db}dB"
-                        ",alimiter=limit=0.97:level=false,"
-                    )
-            # The async resampler snaps samples onto the wallclock
-            # timestamps by stretching/padding up to 1000 samples/s: raw
-            # capture stamps jitter 10-20ms backward ("Non-monotonous
-            # DTS") and WebRTC receivers punish that with audible
-            # dropouts. Output lands at 48kHz because Opus over RTP is
-            # ALWAYS clocked at 48kHz (RFC 7587) -- encoding at the
-            # capture rate puts receivers on a stretched timeline.
-            afilter += "aresample=48000:async=1000"
+            # Filter chain and its rationale: see build_audio_filter()
+            afilter = build_audio_filter(
+                self.audio_input, channel=self.audio_channel, highpass_hz=self.audio_highpass_hz,
+                gain_db=self.audio_gain_db, limiter=self.audio_limiter,
+            )
             ffmpeg_cmd.extend([
                 '-af', afilter,
                 '-c:a', 'libopus',
@@ -609,7 +651,7 @@ class MediaMTXStreamer:
     def _print_stream_info(self):
         """Print stream information."""
         self.logger.info(f"[Stream] RTSP URL: {self.rtsp_url}")
-        self.logger.info(f"[Stream] WebRTC URL: {self._build_webrtc_url()}")
+        self.logger.info(f"[Stream] WebRTC URL: {self.urls.webrtc}")
         self.logger.info(f"[Stream] Resolution: {self.frame_width}x{self.frame_height} @ {self.fps}fps, Bitrate: {self.bitrate}")
     
     def _ensure_ffmpeg_stopped(self):
@@ -685,7 +727,7 @@ class MediaMTXStreamer:
         self._demand_stop_event.clear()
         self._demand_thread = threading.Thread(
             target=self._demand_supervisor_loop,
-            name=f"MediaMTX_Demand_{self.camera_sn_id}",
+            name=f"MediaMTX_Demand_{self.stream_name}",
             daemon=True
         )
         self._demand_thread.start()
@@ -753,6 +795,18 @@ class MediaMTXStreamer:
         """
         Send frame to stream with improved error handling and performance tracking.
         """
+        # Size not configured: the first frame decides it, then a pending
+        # always-on start goes ahead (on-demand waits for the supervisor)
+        if not self._size_known:
+            if frame is None:
+                return False
+            self.frame_height, self.frame_width = frame.shape[:2]
+            self.logger.info(f"[Stream] Frame size from first frame: {self.frame_width}x{self.frame_height}")
+            if self._start_pending and not self.on_demand:
+                self._start_pending = False
+                if not self._ensure_ffmpeg_started():
+                    return False
+
         # Quick exit if not streaming
         if not self.is_streaming or not self.ffmpeg_process:
             return False
@@ -851,7 +905,7 @@ class MediaMTXStreamer:
             ping_start = time.time()
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(2.0)
-            result = sock.connect_ex((self.mediamtx_ip, self.rtsp_port))
+            result = sock.connect_ex((self.host, self.rtsp_port))
             sock.close()
             
             if result == 0:
@@ -987,11 +1041,7 @@ class MediaMTXStreamer:
     
     def get_webrtc_url(self):
         """Get the WebRTC URL."""
-        return self._build_webrtc_url()
-    
-    def get_hls_url(self, hls_port=8889):
-        """This is deprecated, will just return webrtc for legacy support."""
-        return self.get_webrtc_url()
+        return self.urls.webrtc
     
     def get_stats(self):
         """Get comprehensive streaming statistics."""
@@ -1033,67 +1083,72 @@ class MediaMTXStreamer:
         }
 
     @classmethod
-    def from_config(cls, cfg, **overrides):
-        from .config_loader import init_kwargs
-        if hasattr(cfg, "model_dump"):
-            cfg = cfg.model_dump()
-        else:
-            cfg = dict(cfg)
+    def from_camera(cls, camera, server, node, **overrides):
+        """
+        Build the streamer of one camera from typed config.
 
-        encoder = cfg.get("encoder", {})
-        kwargs: dict = {
-            "mediamtx_ip": cfg.get("mediamtx_ip", "localhost"),
-            "rtsp_port": cfg.get("rtsp_port", 8554),
-            "camera_sn_id": cfg.get("camera_sn_id", ""),
-            "fps": cfg.get("fps", 30),
-            "frame_width": cfg.get("frame_width", 1920),
-            "frame_height": cfg.get("frame_height", 1080),
-            "bitrate": cfg.get("bitrate", "1500k"),
-            "hw_encode": cfg.get("hw_encode", False),
-            "debug_log_interval": cfg.get("debug_log_interval", 60.0),
-            "on_demand": cfg.get("on_demand", False),
-            "demand_url": cfg.get("demand_url", ""),
-            "demand_poll_interval": cfg.get("demand_poll_interval", 3.0),
-            "demand_grace_period": cfg.get("demand_grace_period", 10.0),
-            "demand_timeout": cfg.get("demand_timeout", 5.0),
-            "encoder_preset": encoder.get("preset", "ultrafast"),
-            "encoder_codec": encoder.get("codec", "copy"),
-            "stream_queue_size": encoder.get("queue_size", 2),
+        Args:
+            camera: a ``CameraConfig`` with a ``stream`` block (``config.cameras["name"]``).
+            server: the shared ``MediaMTXConfig`` (``config.mediamtx``).
+            node: the ``NodeConfig`` (``config.node``) whose ``sn`` fills ``{sn}``.
+            overrides: any __init__ kwarg (e.g. ``demand_check=``); wins over config.
+
+        Size and fps come from ``stream`` or else the camera's ``capture``; an
+        unknown size is taken from the first frame. ``stream.enabled`` is the
+        caller's to check.
+        """
+        stream = camera.stream
+        if stream is None:
+            raise ValueError(f"camera {camera.name!r} has no stream block")
+        if server is None or not server.host:
+            raise ValueError("mediamtx.host is required to stream")
+        width, height = camera.stream_size()
+        kwargs = {
+            "host": server.host,
+            "rtsp_port": server.rtsp_port,
+            "webrtc_port": server.webrtc_port,
+            "rtsp_url": server.rtsp_url,
+            "webrtc_url": server.webrtc_url,
+            "demand_url": server.demand_url,
+            "demand_poll_interval": server.demand.poll_interval,
+            "demand_grace_period": server.demand.grace_period,
+            "demand_timeout": server.demand.timeout,
+            "stream_name": camera.stream_name(node.sn),
+            "fps": camera.stream_fps(),
+            "frame_width": width,
+            "frame_height": height,
+            "bitrate": format_bitrate(stream.bitrate),
+            "on_demand": stream.on_demand,
+            "debug_log_interval": stream.debug_log_interval,
+            "encoder_preset": stream.encoder.preset,
+            "encoder_codec": stream.encoder.codec,
+            "stream_queue_size": stream.encoder.queue_size,
         }
-        # Only when the section is present -- otherwise these keys would
-        # shadow any audio_* values arriving through extras/overrides.
-        #
-        # Two shapes are accepted. Flat (one fixed source):
-        #   audio: {device: ..., rate: ..., gain_db: ..., bitrate: ...}
-        # Or switchable, with per-source settings kept side by side so
-        # flipping `source` is a one-key change:
-        #   audio:
-        #     source: "camera" | "mic"
-        #     camera: {url: ..., gain_db: ...}
-        #     mic: {device: ..., rate: ..., channels: ..., map_channel: ...,
-        #           gain_db: ...}
-        #     bitrate: "24k"
-        audio = cfg.get("audio") or {}
-        if audio:
-            source = str(audio.get("source", "")).lower()
-            if source in ("camera", "rtsp"):
-                cam = audio.get("camera") or {}
+        audio = stream.audio
+        if audio is not None:
+            resolved = audio.resolved_filter()
+            kwargs.update({
+                "audio_input": audio.input.type,
+                "audio_highpass_hz": resolved.highpass_hz,
+                "audio_gain_db": resolved.gain_db,
+                "audio_limiter": resolved.limiter,
+                "audio_bitrate": format_bitrate(audio.bitrate),
+                "audio_retry_backoff": audio.retry.backoff,
+                "audio_retry_backoff_max": audio.retry.backoff_max,
+                "audio_reset_after": audio.retry.reset_after,
+            })
+            if audio.input.type == "alsa":
                 kwargs.update({
-                    "audio_source": "rtsp",
-                    "audio_url": cam.get("url", audio.get("url", "")),
-                    "audio_gain_db": cam.get("gain_db", 0),
-                    "audio_bitrate": audio.get("bitrate", "24k"),
+                    "audio_device": audio.input.device,
+                    "audio_rate": audio.input.rate,
+                    "audio_channels": audio.input.channels,
+                    "audio_channel": audio.input.channel,
                 })
             else:
-                mic = audio.get("mic") or audio
+                # The camera's own source, never a second URL
                 kwargs.update({
-                    "audio_source": "alsa",
-                    "audio_device": mic.get("device", None),
-                    "audio_rate": mic.get("rate", 16000),
-                    "audio_channels": mic.get("channels", 2),
-                    "audio_map_channel": mic.get("map_channel", 0),
-                    "audio_gain_db": mic.get("gain_db", 18.0),
-                    "audio_bitrate": audio.get("bitrate", "24k"),
+                    "audio_url": camera.source.target,
+                    "audio_transport": getattr(camera.source, "transport", "tcp"),
                 })
-        kwargs = {**cfg.get("extras", {}), **kwargs, **overrides}
-        return cls(**init_kwargs(cls, kwargs))
+        kwargs.update(overrides)
+        return cls(**kwargs)

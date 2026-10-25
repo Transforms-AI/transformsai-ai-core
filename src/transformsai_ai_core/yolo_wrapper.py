@@ -173,6 +173,18 @@ class _YOLOExportMixin:
         return all_results
 
 
+def _model_dict(model) -> dict[str, Any]:
+    """The wrapper's model_dict from a typed ModelConfig."""
+    return {
+        "path": str(model.resolved_path),
+        "task": model.task,
+        "batch": model.batch,
+        "export": model.export,
+        "export_options": dict(model.export_options),
+        "set_classes": model.set_classes,
+    }
+
+
 class YOLOWrapper(_YOLOExportMixin, YOLO):
     """
     YOLO wrapper with auto-export and sequential batching.
@@ -190,7 +202,7 @@ class YOLOWrapper(_YOLOExportMixin, YOLO):
         Initialize YOLO wrapper with optional export and batching.
         
         Args:
-            model_dict: Dictionary containing model configuration
+            model_dict: {path (required), task, batch, export, export_options, set_classes}
             **kwargs: Additional arguments passed to YOLO constructor
         """
         if not ULTRALYTICS_AVAILABLE:
@@ -201,7 +213,7 @@ class YOLOWrapper(_YOLOExportMixin, YOLO):
         
         self.logger = get_logger(self)
         self.original_model_path = Path(model_dict["path"])
-        self.task = model_dict.get("load_options", {}).get("task", "detect")
+        self.task = model_dict.get("task", "detect")
         self.export_enabled = model_dict.get("export", False)
         self.export_options = model_dict.get("export_options", {})
         self.batch_size = model_dict.get("batch", 1)
@@ -232,9 +244,13 @@ class YOLOWrapper(_YOLOExportMixin, YOLO):
         return _YOLOExportMixin.predict(self, source, YOLO.predict, **kwargs)
 
     @classmethod
-    def from_config(cls, cfg, **overrides):
-        model_dict = cfg.model_dump() if hasattr(cfg, "model_dump") else dict(cfg)
-        return cls(model_dict=model_dict, **overrides)
+    def from_config(cls, model, **overrides):
+        """Build from a typed ``ModelConfig`` (``config.models["name"]``).
+
+        The path is ``model.resolved_path`` (explicit path, else the downloaded
+        model); `overrides` go to the ultralytics constructor.
+        """
+        return cls(model_dict=_model_dict(model), **overrides)
 
 
 class YOLOEWrapper(_YOLOExportMixin, YOLOE): 
@@ -255,7 +271,7 @@ class YOLOEWrapper(_YOLOExportMixin, YOLOE):
         Initialize YOLOE wrapper with optional export and batching.
         
         Args:
-            model_dict: Dictionary containing model configuration
+            model_dict: {path (required), task, batch, export, export_options, set_classes}
             **kwargs: Additional arguments passed to YOLOE constructor
         """
         if not ULTRALYTICS_AVAILABLE:
@@ -269,7 +285,7 @@ class YOLOEWrapper(_YOLOExportMixin, YOLOE):
         self.export_enabled = model_dict.get("export", False)
         self.export_options = model_dict.get("export_options", {})
         self.batch_size = model_dict.get("batch", 1)
-        self.task = model_dict.get("load_options", {}).get("task", "detect")
+        self.task = model_dict.get("task", "detect")
         self.set_classes = model_dict.get("set_classes", None)
         self.exported_model_path = None
         
@@ -352,6 +368,10 @@ class YOLOEWrapper(_YOLOExportMixin, YOLOE):
         return _YOLOExportMixin.predict(self, source, YOLOE.predict, **kwargs)
 
     @classmethod
-    def from_config(cls, cfg, **overrides):
-        model_dict = cfg.model_dump() if hasattr(cfg, "model_dump") else dict(cfg)
-        return cls(model_dict=model_dict, **overrides)
+    def from_config(cls, model, **overrides):
+        """Build from a typed ``ModelConfig`` (``config.models["name"]``).
+
+        The path is ``model.resolved_path`` (explicit path, else the downloaded
+        model); `overrides` go to the ultralytics constructor.
+        """
+        return cls(model_dict=_model_dict(model), **overrides)

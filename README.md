@@ -5,6 +5,9 @@ RTSP/WebRTC streaming, HTTP upload, structured logging, YAML config. Thread-safe
 (heavy deps load on first use). This README is the quick reference — read the docstrings/source
 for anything not covered here.
 
+> **5.0 is a clean break from 4.x config.** See [MIGRATION-5.0.md](MIGRATION-5.0.md) and
+> [CHANGELOG.md](CHANGELOG.md).
+
 ```bash
 uv add "transformsai-ai-core @ git+https://github.com/Transforms-AI/transformsai-ai-core.git"
 # Inference backends (mutually exclusive — pick one): onnx | rknn | trt
@@ -15,36 +18,37 @@ uv add "transformsai-ai-core[rknn] @ git+https://github.com/Transforms-AI/transf
 
 | Symbol | What it is |
 |---|---|
-| `process_config`, `load_config`, `save_config` | YAML → validated dict |
-| `get_logger`, `configure_logging` | structured JSONL logger |
+| `load_config`, `validate_config`, `save_config`, `Config` | YAML → typed config + `ValidationReport` |
+| `get_logger`, `configure_logging`, `add_secret`, `redact` | structured JSONL logger with secret redaction |
 | `VideoCaptureAsync` | background-thread capture |
-| `MediaMTXStreamer` | push frames → MediaMTX (RTSP/WebRTC/HLS) |
-| `ApiClient`, `Response` | generic pooled HTTP client (**use this**) |
-| `DataUploader` | legacy transformsai uploader (still works) |
+| `MediaMTXStreamer` | push frames → MediaMTX (RTSP/WebRTC) |
+| `ApiClient`, `Response` | generic pooled HTTP client |
 | `YOLOWrapper`, `YOLOEWrapper` | Ultralytics wrappers (auto-export ONNX/TRT/RKNN) |
 | `mat_to_response`, `time_to_string` | JPEG-encode a frame / server timestamp format |
 
+The full config API (every model, `register_validator`, `register_secret`, …) lives in
+`transformsai_ai_core.config`.
+
 **You have freedom here.** Every runtime class takes plain kwargs and works standalone — config is a
-convenience, not a requirement. Use `from_config(section, **overrides)` to build from a config section,
-or construct manually. Precedence is always **overrides > typed config fields > `extras`**.
+convenience, not a requirement. With a config, build components from the typed objects:
+`VideoCaptureAsync.from_camera(camera)`, `MediaMTXStreamer.from_camera(camera, config.mediamtx, config.node)`,
+`ApiClient.from_config(config.api)`, `YOLOWrapper.from_config(config.models["name"])`. Keyword overrides
+always win over config; defaults live only in the config models.
 
 ---
 
 ## Caveats (read these)
 
-- **`process_config` does not resolve models by default.** Pass `resolve_models=True` to download/export.
-  Without it, `model["path"]` stays whatever's in the YAML.
-- **The API config key is `advanced.api`, not `datasend`.** `DatasendConfig` the class still exists, but
-  there is no `advanced.datasend` section anymore. Legacy `DataUploader` is built from `advanced.api` too.
+- **Config is validated, never mutated.** Derived values are properties: `camera.source.url`,
+  `config.stream_urls(camera)`, `model.resolved_path`. Nothing is written back into your YAML/dict.
+- **Unknown keys are reported, never silently dropped.** Outside a `settings` block, an unknown key is a
+  warning at runtime (`load_config`) and an error at the gate (`validate_config` /
+  `transformsaicore config validate`). Every core object has a free `settings: {}`; the root has one too.
 - **`ApiClient` never raises on network failure** — it returns `Response(status_code=0, ok=False)`. Always
-  check `resp.ok`. A failed *write* is cached and retried in the background; GET/HEAD/OPTIONS are never cached.
+  check `resp.ok`. A failed *write* is kept in the outbox and retried; GET/HEAD/OPTIONS never are.
 - **`cap.read(copy=False)` returns a live reference** — fast, but don't mutate it (next frame overwrites it).
-- **Logger sink levels are set once**, on the first `configure_logging`/`get_logger` call. Call
-  `configure_logging(...)` from your entry script *before* anything else logs. Later level changes are ignored.
-- **`type` (model) and `meta.name` are the only truly required fields.** Everything else has a default.
-- **`extras: {}` exists on every strict section** — a sanctioned dumping ground for keys we haven't modeled.
-  Unknown keys there survive validation and reach `from_config`. Don't add Pydantic validation to freeform
-  sections (`settings`, `timings`, `pipeline`, `extras`, `export_options`, `endpoints`).
+- **Call `configure_logging` first, then add your own sinks.** It only ever replaces core's sinks, so
+  calling it again later is safe. Don't call `logger.configure(patcher=...)` — use `add_patcher()`.
 - **Inference backends conflict.** Installing `trt`, `rknn`, and `onnx` together breaks; pick one per device.
   TensorRT is auto-excluded on `aarch64` at the dependency level.
 
@@ -52,220 +56,153 @@ or construct manually. Precedence is always **overrides > typed config fields > 
 
 ## Config (`config.yaml`)
 
-Single file drives everything. Only `meta.name` and each model's `type` are required; all else defaults.
+The full, commented reference — every key with its default and meaning — is
+[config.example.yaml](config.example.yaml), generated from the schema
+(`uv run transformsaicore config example`). A minimal config:
 
 ```yaml
-meta:
-  name: "project-name"          # REQUIRED
-  version: "1.0.0"
-  token: ""                     # sent as x-token header by legacy uploader
-  extras: {}
+node:
+  sn: "pb-00004"                    # REQUIRED: the one node identity
 
-cameras:
-  - local: false                # true = use local_source instead of RTSP
-    local_source: ""            # path to local video file
-    rtsp_source:                # process_config builds cam["rtsp_url"] from this
-      username: "admin"
-      password: ""
-      ip: ""                    # REQUIRED if not local
-      port: 554
-      path: "/Streaming/Channels/101"
-      extras: {}
-    capture:                    # mirrors VideoCaptureAsync.__init__ (typed/validated)
-      buffer_size: 1
-      opencv_backend: auto      # 'auto'|'ffmpeg'|'gstreamer'|null
-      max_frame_age_ms: null    # drop frames older than this (ms)
-      width: null
-      height: null
-      driver: null
-      auto_resize: true
-      hw_decode: false
-      fps: null
-      open_timeout: 5.0         # network open/read timeout (applied via FFmpeg)
-      rtsp_transport: tcp       # 'tcp'|'udp'|null (rtsp:// only; null = FFmpeg negotiates)
-      ffmpeg_options: null      # verbatim OPENCV_FFMPEG_CAPTURE_OPTIONS override
-      health_log_interval: 60.0 # periodic health line (0 = off)
-      restart:                  # reconnect policy
-        enabled: null           # null → legacy auto_restart_on_fail → true
-        delay: null             # backoff CEILING; null → legacy restart_delay → 30.0
-        backoff_start: 1.0      # first retry delay; doubles up to `delay`
-        backoff_jitter: 0.2     # ±fraction, keeps multi-camera reconnects out of lockstep
-        reset_after: 30.0       # healthy seconds before the ramp resets
-        max_attempts: null      # null = retry forever
-        stall_timeout: null     # null = auto max(5, 20/fps); 0 = off
-        extras: {}
-      timestamp:                # overwrite the camera OSD timestamp with current system time
-        enabled: false          # off by default; stamps every published frame when true
-        rect_ratios: null       # (x,y,w,h) hide-rect as frame ratios; null = top-left OSD default
-        rect_coords: null       # (x,y,w,h) in pixels; overrides rect_ratios
-        hide_color: null        # BGR of hide rectangle; null = white
-        font_color: null        # BGR of timestamp text; null = black
-        font_scale: null        # null = auto from rect height
-        time_format: null       # strftime; null = '%Y-%m-%d %H:%M:%S'
-        extras: {}
-      auto_restart_on_fail: null  # LEGACY → restart.enabled
-      restart_delay: null         # LEGACY → restart.delay
-      extras: {}
-    settings: {}                # freeform per-camera → config["cameras"][n]["settings"]
-    extras: {}
+cameras:                            # a map keyed by camera name ...
+  surveillance:
+    source: {type: rtsp, host: 192.168.1.64, user: admin, password: "..."}
+    capture: {fps: 10, width: 1280, height: 720}
+    stream: {on_demand: true}       # stream name defaults to cam_sn_{sn}_{camera}
+  ocr:
+    source: {type: device, path: /dev/video0}
+    settings: {flash: {pin: 17}}    # project-owned: core never looks inside
 
-advanced:
-  models:
-    model_name:                 # key = how you look it up in code
-      type: "person-det"        # REQUIRED — category label
-      download_key: ""          # server download key (used when resolve_models=True)
-      batch: 1
-      path: ""                  # auto-filled after download/export
-      export: false             # auto-export on load
-      load_options:
-        lib_type: "YOLO"        # YOLO | YOLOE
-        task: "detect"          # detect | classify | segment
-        extras: {}
-      export_options: {}        # freeform → passed straight to ultralytics export
-      extras: {}
+# cameras:                          # ... or a list, auto-named camera_0, camera_1, ...
+#   - source: {type: rtsp, host: 10.0.0.11}
 
-  timings: {}                   # freeform — your intervals live here
-
-  api:                          # ApiClient config (see §ApiClient for field meanings)
-    enabled: true
-    base_url: ""                # REQUIRED if enabled
-    headers: {}
-    timeout: 30
-    success_codes: [200, 201, 202, 204]
-    default_content_type: auto  # json | form-data | auto
-    auth_keys: []               # rotated per request
-    auth_header: X-Secret-Key
-    max_retries: 3
-    retry_backoff: 1.0
-    retry_backoff_max: 30
-    retry_on_status: [408, 429, 500, 502, 503, 504]
-    max_workers: null           # null = min(2, cpu_count)
-    cache_enabled: true
-    cache_dir: .core-api-cache
-    cache_retry_interval: 100
-    max_cache_items: 300
-    max_cache_age_seconds: 86400
-    max_cache_retries: 5
-    endpoints: {}               # freeform {name: path | {path, method, headers, content_type, cache, persist}}
-                                # auto-registered by from_config
-    pool_connections: 10
-    pool_maxsize: 10
-    settings: {}                # freeform (e.g. jpeg_quality)
-    extras: {}
-
-  livestream:                   # mirrors MediaMTXStreamer.__init__
-    enabled: true
-    mediamtx_ip: "localhost"
-    rtsp_port: 8554
-    camera_sn_id: ""            # default, override per camera in from_config
-    fps: 30
-    frame_width: 1920
-    frame_height: 1080
-    bitrate: "1500k"
-    hw_encode: false            # auto-detect GPU encoder
-    debug_log_interval: 60.0
-    on_demand: false            # true = push only while a viewer is watching (see §MediaMTX Streaming)
-    demand_url: ""              # blank = derive https://{mediamtx_ip}/demand/cam_sn_{camera_sn_id}
-    demand_poll_interval: 3.0   # seconds between outbound demand polls
-    demand_grace_period: 10.0   # demand must stay OFF this long before FFmpeg stops (keep >= 5)
-    demand_timeout: 5.0         # HTTP timeout per poll
-    encoder:
-      preset: ultrafast
-      codec: copy               # copy | libx264
-      queue_size: 2
-      extras: {}
-    settings: {}                # freeform (NOT consumed by from_config)
-    extras: {}
-
-  pipeline: {}                  # freeform — all project-specific settings
-  extras: {}
+mediamtx: {host: mediamtx.example.com}
+api: {base_url: "https://api.example.com/api/v1/", endpoints: {heartbeat: "telemetry/heartbeats/"}}
+models:
+  person-det: {path: models/yolo11n.pt}
+logging: {console_level: WARNING, file_level: INFO}
+settings: {}                        # the project's own section
 ```
+
+Required keys: `node.sn`, each camera's `source` (and its type's required field), `api.base_url` when
+`api` is enabled, `mediamtx.host` when any stream is enabled, and one of `path` / `download_key` / `type`
+per model. Source types: `rtsp` (host), `device` (path or index), `file` (path), `url` (url).
+
+Values convert only when unambiguous (`"10"` → 10, `"true"` → true). Durations take seconds or units
+(`"500ms"`, `"3s"`, `"2m"`, `"1h"`); bitrates take `"800k"`, `"1.2M"` or bits/s. The only limits are
+physical ones (a period > 0, a port 1–65535) — never policy ranges.
 
 ```python
-from transformsai_ai_core import process_config, load_config
+from transformsai_ai_core.config import ConfigError, load_config, validate_config
 
-config = process_config(
-    "config.yaml",         # str | Path — REQUIRED
-    base_dir=None,         # project root for model paths (default: config's parent dir)
-    resolve_models=False,  # True = resolve model paths
-    download_models=False, # True = download missing models (needs resolve_models)
-)
-# load_config(path, validate=True) = parse + validate only, no RTSP/model resolution
+config, report = load_config("config.yaml")     # lenient: unknown keys / bad optional values -> warnings
+for issue in report.warnings:                    # Issue(path, message, suggestion)
+    print(issue)                                 # cameras.a.stream.bitrat: unknown key (did you mean 'bitrate'?)
+# raises ConfigError(report) when a required key is missing/invalid -- with every problem, not the first
 
-meta       = config["meta"]
-cameras    = config["cameras"]            # list — iterate per camera
-models_cfg = config["advanced"]["models"]
-timings    = config["advanced"]["timings"]
-api_cfg    = config["advanced"]["api"]
-ls_cfg     = config["advanced"]["livestream"]
-pipeline   = config["advanced"]["pipeline"]
+report = validate_config("config.yaml")          # strict, no side effects: the pre-deploy gate
+if not report.ok: ...
+
+config.cameras["surveillance"].source.url        # rtsp://admin:...@192.168.1.64:554/... (password URL-encoded)
+config.stream_urls("surveillance").webrtc        # https://mediamtx.example.com/live/cam_sn_pb-00004_surveillance/
+config.models["person-det"].resolved_path        # Path, relative to the config file's directory
+config.secrets()                                 # every secret value (for log redaction)
+config.masked_dump("yaml")                       # full config with secrets as ***
 ```
+
+### Project settings and validators
+
+Project keys go in a `settings` block. Register checks so the same gate covers them:
+
+```python
+from pydantic import BaseModel, ConfigDict
+from transformsai_ai_core.config import register_secret, register_validator
+
+class MeterSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")   # report typos too
+    read_interval: float = 60.0
+
+register_validator("settings.meter", MeterSettings)           # pydantic model or a function
+register_validator("cameras.*.settings.flash", check_flash, required=True)
+register_secret("settings.modbus.password")                   # in secrets(), masked, redacted in logs
+```
+
+Failures are errors in strict mode and warnings in lenient mode (unless `required=True`).
 
 ---
 
 ## Logger
 
-JSONL to `.core-logs/{date}/{time}_{run_id}.jsonl` (all levels) + console (INFO+ by default).
-Auto-rotates at 10 MB. `.error()`/`.exception()` capture the current traceback automatically.
+JSONL to `.core-logs/{date}/{run_id}_{time}.jsonl` + console. Auto-rotates at 10 MB.
+`.error()`/`.exception()` capture the current traceback automatically.
 
 ```python
+from loguru import logger as loguru_logger
 from transformsai_ai_core import configure_logging, get_logger
 
-configure_logging(cli_sink_level="INFO", file_sink_level="DEBUG")  # entry script, once
+configure_logging(config.logging, secrets=config.secrets())   # 1. entry script, first
+loguru_logger.add(my_sink, level="WARNING")                   # 2. then your own sinks (never removed by core)
 
 logger = get_logger()           # auto-detects caller module name
 logger = get_logger("MyClass")  # or pass a name / object
-logger.debug("file only by default")
-logger.info("console + file")
-try:
-    risky()
-except Exception:
-    logger.exception("full traceback → file + console")
+logger.info("rtsp://admin:pw@cam/s")  # -> rtsp://admin:***@cam/s on every sink
 ```
+
+- `console_level` / `file_level`: a level name, or `OFF` / `null` for no sink. Keyword args
+  (`configure_logging(console_level="DEBUG")`) override the config.
+- Redaction runs on every record (message and `extra`) before any sink: URL passwords, auth headers
+  (`x-auth-key`, `x-secret-key`, `authorization`, `x-fleet-key`, `x-tai-token`), `Bearer` tokens, and
+  every registered secret (plus its URL-encoded form). Core's sinks also scrub tracebacks; wrap your own
+  with `redacting_sink(sink)`. Chain extra patchers with `add_patcher(fn)`.
+
 View a file: `cat run_*.jsonl | logdy` (https://logdy.dev).
 
 ---
 
 ## Video Capture
 
-Auto-detects source type (device index / RTSP URL / file path). Reconnect is supervised
-and **on by default** — a failed open, a run of failed reads, a stalled stream or an
-unexpected exception all reconnect on a jittered exponential backoff.
+Reconnect is supervised and **on by default** — a failed open, a run of failed reads, a stalled stream or
+an unexpected exception all reconnect on a jittered exponential backoff.
 
 ```python
 from transformsai_ai_core import VideoCaptureAsync
 
-cap = VideoCaptureAsync.from_config(config["cameras"][0]).start()   # recommended
+cap = VideoCaptureAsync.from_camera(config.cameras["surveillance"], frame_hook=stamp_time).start()
 
 # manual:
 cap = VideoCaptureAsync(
-    src=cam["rtsp_url"],          # REQUIRED — RTSP URL (built by process_config), file path, or device index
-    width=None, height=None,
-    buffer_size=1,                # OpenCV buffer; 1 = minimal lag
-    hw_decode=False,
-    fps=None,
-    opencv_backend="auto",        # "auto" | "ffmpeg" | "gstreamer"
-    max_frame_age_ms=None,        # drop stale frames
-    auto_resize=True,
+    src="rtsp://...",             # URL, file path, device path or index
+    source_type=None,             # "device" | "file" | "network" (None = auto-detect)
+    width=None, height=None, fps=None,
+    buffer_size=1, hw_decode=False, max_frame_age_ms=None, auto_resize=True,
     # --- reconnect policy ---
-    auto_restart_on_fail=True,    # False = raise on a bad source, die on failure (legacy)
-    restart_delay=30.0,           # backoff CEILING
-    restart_backoff_start=1.0,    # first retry; doubles 1 → 2 → 4 … → restart_delay
-    restart_backoff_jitter=0.2,
-    restart_reset_after=30.0,     # healthy seconds before the ramp resets
-    max_restart_attempts=None,    # None = forever
-    stall_timeout=None,           # None = auto max(5, 20/fps); no frame for this long → reconnect
-    open_timeout=5.0,             # bounds a blocking open/grab on a dead network
-    rtsp_transport="tcp",         # rtsp:// only; None = let FFmpeg negotiate
+    auto_restart_on_fail=True, restart_delay=30.0,  # restart_delay = backoff CEILING
+    restart_backoff_start=1.0, restart_backoff_jitter=0.2, restart_reset_after=30.0,
+    max_restart_attempts=None, stall_timeout=None,  # None = auto max(5, 20/fps)
+    open_timeout=5.0, rtsp_transport="tcp", ffmpeg_options=None,
     health_log_interval=60.0,
     on_state_change=None,         # fn(state, stats) on every transition
-    # --- OSD timestamp overwrite (Hikvision clocks are often wrong) ---
-    timestamp_overlay=False,      # True = stamp current system time over the camera OSD on every frame
-    timestamp_overlay_options=None,  # dict passed to utils.hide_camera_timestamp_and_add_current_time
-).start(loop=False)               # loop=True repeats video files
+    frame_hook=None,              # fn(frame) -> frame | None, on the capture thread
+    loop=None,                    # file sources: restart at EOF (default True)
+).start()
 
-grabbed, frame = cap.read(wait_for_new_frame=True, timeout=1.0, copy=True)  # copy=False = live ref, don't mutate
+grabbed, frame = cap.read(wait_for_new_frame=True, timeout=1.0, copy=True)
 cap.stop(); cap.release()
+```
+
+### Frame hook
+
+`frame_hook` runs on the capture thread on every published frame, so every consumer (inference,
+stream, upload) sees its result. Return a frame, or `None` if you modified it in place. Exceptions are
+caught and logged (first failure, then at most once a minute) and the unhooked frame is published — a
+hook can never stop capture. `get_stats()["hook_errors"]` counts failures. The classic use is the
+camera-clock fix:
+
+```python
+from transformsai_ai_core.utils import hide_camera_timestamp_and_add_current_time
+
+def stamp_time(frame):
+    return hide_camera_timestamp_and_add_current_time(frame, inplace=True, corner_label="Gate 2")
 ```
 
 ### Health
@@ -273,128 +210,102 @@ cap.stop(); cap.release()
 ```python
 cap.state        # idle | connecting | streaming | reconnecting | failed | stopped
 cap.is_healthy   # streaming AND a frame arrived within the stall window
-cap.get_stats()  # restart_count, current_backoff, last_error, uptime_seconds,
-                 # measured_fps, total_frames, frames_dropped_stale, orphaned_threads, …
+cap.get_stats()  # restart_count, current_backoff, last_error, uptime_seconds, measured_fps,
+                 # total_frames, frames_dropped_stale, orphaned_threads, hook_errors, ...
 ```
 
-While the source is down, `read()` blocks up to `timeout` and returns `(False, None)` —
-it never busy-spins. After `stop()`/`release()` it returns immediately.
-
-`release()` waits `max(2, open_timeout + 1)`s for the capture thread; if OpenCV is wedged
-in a blocking call the thread is abandoned (it releases its own handle when the call
-returns) rather than releasing a handle another thread is still inside. Such an instance
-is terminal — `start()` on it raises; build a new `VideoCaptureAsync`.
+Log lines and `get_stats()["src"]` show the source with its password masked. While the source is down,
+`read()` blocks up to `timeout` and returns `(False, None)` — it never busy-spins. `release()` abandons a
+thread wedged inside OpenCV instead of releasing a handle it is still using; such an instance is
+terminal — build a new `VideoCaptureAsync`.
 
 ---
 
 ## MediaMTX Streaming
 
+A stream belongs to a camera (`cameras.<name>.stream`); the server (`mediamtx`) is shared. Size and fps
+come from `stream`, else the camera's `capture`; an unknown size is taken from the first frame.
+
 ```python
 from transformsai_ai_core import MediaMTXStreamer
 
-streamer = MediaMTXStreamer.from_config(config["advanced"]["livestream"], camera_sn_id="cam_01")
-# manual: MediaMTXStreamer(mediamtx_ip="localhost", rtsp_port=8554, camera_sn_id="cam_01",
-#   fps=30, frame_width=1920, frame_height=1080, bitrate="1500k",
-#   encoder_preset="ultrafast", encoder_codec="copy", stream_queue_size=2,
-#   hw_encode=False, debug_log_interval=60.0)
+camera = config.cameras["surveillance"]
+streamer = MediaMTXStreamer.from_camera(camera, config.mediamtx, config.node)
+# manual: MediaMTXStreamer("mediamtx.example.com", 8554, "cam_sn_pb-00004", fps=10,
+#   frame_width=1280, frame_height=720, bitrate="800k", encoder_codec="libx264", ...)
 
 streamer.start_streaming()
 streamer.update_frame(frame)      # call in loop — non-blocking
-streamer.get_rtsp_url(); streamer.get_webrtc_url(); streamer.get_hls_url()
+streamer.get_rtsp_url(); streamer.get_webrtc_url()
 streamer.stop_streaming()
 ```
 
+- **Stream name**: `stream.name` template with `{sn}`, `{camera}`, `{index}`; default
+  `cam_sn_{sn}_{camera}`. Names must be unique across enabled streams (a validation error otherwise).
+- **URLs**: `mediamtx.rtsp_url` / `webrtc_url` / `demand_url` templates (`{host}`, `{rtsp_port}`,
+  `{webrtc_port}`, `{name}`); `null` keeps the 4.x URLs (WebRTC: `https://{host}/live/{name}/`, or
+  `http://{host}:{webrtc_port}/live/{name}/` for a bare IP).
+- **Encoder**: `encoder.codec` is `libx264` (default), `auto` (first available hardware encoder) or any
+  FFmpeg H.264 encoder name.
+- **Audio** (`stream.audio`, best-effort: a failed audio input drops to video-only and is retried on a
+  backoff): `input: {type: alsa, device: ...}` (a local mic) or `input: {type: camera}` (this camera's own
+  source). `filter` applies channel select (alsa) → `highpass_hz` → `gain_db` → `limiter` → resample;
+  unset keys use the input's defaults (alsa: 20 Hz, 18 dB; camera: off, 0 dB). A high-pass above 20 Hz is
+  4th-order. `streamer.audio_active` / `audio_error` report the state.
+
 ### On-demand publishing (`on_demand: true`)
 
-With `on_demand: true`, `start_streaming()` starts a supervisor thread instead of FFmpeg: it polls a
-demand flag on the MediaMTX host (derived as `https://{mediamtx_ip}/demand/cam_sn_{camera_sn_id}`)
-and launches FFmpeg only while a viewer is watching, stopping it `demand_grace_period` seconds after
-demand ends. Idle cost is one boolean check per `update_frame` call — zero upstream bandwidth. Your
-`start → update_frame loop → stop` code is unchanged, and `on_demand: false` (default) keeps
-always-on behavior.
-
-Fail-safe: a failed/unreadable poll never changes state (idle stays idle, live stays live). For
-tests or alternate backends, inject `demand_check=callable` (returns bool) via `from_config`
-overrides. **The server side needs matching setup** — MediaMTX `runOnDemand` hooks plus the flag
-server; see [mediamtx-host/README.md](mediamtx-host/README.md) for the full from-scratch VPS
-tutorial (docker compose, nginx, TLS, verification).
+`start_streaming()` starts a supervisor thread instead of FFmpeg: it polls the demand flag
+(`https://{host}/demand/{name}` by default) and runs FFmpeg only while a viewer is watching, stopping it
+`mediamtx.demand.grace_period` seconds after demand ends. A failed/unreadable poll never changes state.
+Inject `demand_check=callable` for tests or other backends. **The server side needs matching setup** —
+see [mediamtx-host/README.md](mediamtx-host/README.md); its `mediamtx.yml` serves demand flags only for
+`live/cam_sn_*` paths.
 
 ---
 
-## ApiClient (preferred HTTP client)
+## ApiClient
 
-Generic, pooled (`requests.Session` keep-alive), with directory-per-request disk cache + background retry.
-No transformsai-specific formatting; a heartbeat is just `post(..., cache=False)`. Returns a frozen
-`Response` — **never raises** on transport failure.
+Generic, pooled (`requests.Session` keep-alive), with a directory-per-request disk outbox + background
+retry. A heartbeat is just `post(..., cache=False)`. Returns a frozen `Response` — **never raises** on
+transport failure.
 
 ```python
 from transformsai_ai_core import ApiClient, mat_to_response
 
-client = ApiClient.from_config(config["advanced"]["api"])   # endpoints in config auto-registered
+if config.api and config.api.enabled:
+    client = ApiClient.from_config(config.api)      # endpoints auto-registered; overrides win
 
-# verbs (sync — blocks through retries, returns Response)
 resp = client.post("data", json={"event": "detection", "count": 5})
 if resp.ok:                       # ALWAYS check — failure → status_code=0, ok=False
     print(resp.status_code, resp.json(), resp.attempts)
 
-client.request("REPORT", "events", json={"x": 1})   # any verb via the generic core
-client.get("status", params={"q": 1})
-
-# files: {"field": ("name.jpg", bytes, "image/jpeg")} or list of tuples per field
+client.request("REPORT", "events", json={"x": 1})   # any verb
 client.post("alerts", data={"alert": "unsafe"}, files={"image": mat_to_response(frame)})
-
-# async (fire-and-forget) → Future[Response]
-fut = client.post("data", json={"k": "v"}, async_=True)
-
-# heartbeat = a write that is never cached/retried
-client.post("heartbeat", json={"alive": True}, cache=False)
-
-# endpoint profiles: register once, send by name (per-call arg > profile > client default)
-client.register_endpoint("sentiment", "/v1/sentiment")                    # bare path
-client.register_endpoint("heartbeat", {"path": "/hb", "cache": False})    # rich dict
-client.send("sentiment", json={"score": 0.9})
-
-client.shutdown(wait=True)        # or:  with ApiClient(...) as client: ...
+fut = client.post("data", json={"k": "v"}, async_=True)       # Future[Response]
+client.post("heartbeat", json={"alive": True}, cache=False)   # never kept in the outbox
+client.send("heartbeat", json={...})                          # by endpoint name
+client.shutdown(wait=True)
 ```
 
-Manual ctor mirrors the `api:` YAML keys 1:1 — `base_url`, `headers`, `timeout`, `success_codes`,
-`default_content_type` (`json|form-data|auto`), `auth_keys` (rotated), `auth_header`, retry/backoff knobs,
-`retry_on_status` (4xx fails fast), `max_workers`, the `cache_*` knobs, `endpoints`, `pool_*`.
-Failed writes are persisted atomically under `cache_dir/` and retried until success or limits;
-force with `cache=True`/`cache=False`.
+Config → constructor: `retries.{max, backoff, backoff_max, on_status}` → `max_retries`, `retry_*`;
+`outbox.{enabled, dir, retry_interval, max_items, max_age, max_retries}` → `cache_*`, `max_cache_*`;
+`pool.{connections, maxsize, workers}` → `pool_*`, `max_workers`; `content_type` →
+`default_content_type`. Outbox limits: `max_items` / `max_age` 0 or null = unbounded; `max_retries`
+null = unbounded, 0 = never retried.
 
 ### Never-expiring entries (`persist=True`)
 
-The cache normally gives up eventually: a failed write is retried in the background until
-`max_cache_age_seconds` or `max_cache_retries` runs out, then it's dropped. `persist=True` changes
-**only that** — the entry never runs out. Same trigger (failures only, `cache=True/False` still decides
-*whether* to cache), same background retry, still removed the instant it succeeds; it just can't be aged
-out or given up on. Use it for requests that must not be silently lost.
-
-```python
-client.post("alerts", json={"alert": "unsafe"}, persist=True)   # retried until it lands
-```
+`persist=True` (per call, or an endpoint profile's `persist: true`) makes an outbox entry immune to
+`max_age` and `max_retries`: it is retried until it succeeds. `max_items` still applies as a disk
+backstop (transient entries go first). `list_cached()` / `remove_cached(fid)` inspect and drop entries.
 
 ```yaml
-  api:
-    endpoints:
-      alert: "alerts/"            # string form → normal expiry
-      critical:                   # profile dict
-        path: "critical/"
-        persist: true             # per-call persist=False still overrides this
+api:
+  endpoints:
+    alert: "alerts/"            # string form → normal expiry
+    critical: {path: "critical/", persist: true}
 ```
-
-`max_cache_items` continues to apply as a disk backstop (transient entries are evicted first, persistent
-ones only if the cap is still exceeded). `list_cached()` shows everything pending with its `persistent`
-flag; `remove_cached(fid)` is the only way to discard one by hand.
-
-### DataUploader (legacy)
-
-Transformsai-specific v3 uploader. Still supported; **prefer `ApiClient` for new code.** Built from
-`config["advanced"]["api"]` (there is no `datasend` section). Notable bits: `send_data(...)` (async,
-fire-and-forget, cached on failure), `send_data_sync(...)` (blocks, returns dict),
-`send_heartbeat(sn, timestamp=time_to_string(t), status_log="", live_url="")` (not cached),
-`shutdown(wait=True)`. See docstrings for the full kwarg list.
 
 ---
 
@@ -403,120 +314,65 @@ fire-and-forget, cached on failure), `send_data_sync(...)` (blocks, returns dict
 ```python
 from transformsai_ai_core import YOLOWrapper, YOLOEWrapper
 
-config    = process_config("config.yaml", resolve_models=True)   # need this to populate model["path"]
-model_cfg = config["advanced"]["models"]["model_name"]
-
-model = YOLOWrapper(model_cfg)                # dict ctor
-model = YOLOWrapper.from_config(model_cfg)    # equivalent
-# model_cfg: path (REQUIRED), export, batch, load_options{lib_type, task}, export_options{...freeform}
+model = YOLOWrapper.from_config(config.models["person-det"])   # path = model.resolved_path
+model = YOLOWrapper({"path": "yolo11n.pt", "task": "detect", "batch": 1})   # manual dict ctor
+# keys: path (REQUIRED), task, batch, export, export_options{...passed to ultralytics}, set_classes (YOLOE)
 
 results = model.predict(source=frame, conf=0.5)   # source: str|Path|ndarray|list ; any ultralytics kwarg
-for r in results:
-    r.boxes.xyxy, r.boxes.conf, r.boxes.cls
-model.original_model_path        # Path
-model.exported_model_path        # Path | None
+model.original_model_path; model.exported_model_path
 
-# YOLOE — text/visual prompts
-model_cfg["load_options"]["lib_type"] = "YOLOE"
-model = YOLOEWrapper.from_config(model_cfg)   # extra key: "set_classes": list[str] | None
-names = ["person", "knife"]
-model.set_classes(names, model.get_text_pe(names))
-results = model.predict(frame, conf=0.5)
+model = YOLOEWrapper.from_config(config.models["open-vocab"])   # set_classes: [person, knife]
 ```
+
+`transformsaicore download models` fetches models that have a `download_key` or `type` and no explicit
+`path` into `models/<name>/`.
 
 ---
 
 ## End-to-end skeleton
 
-Minimal multi-camera loop: capture → stream → periodic inference → upload. Project logic goes in the
-`TODO`s. This is a starting template, not a framework — restructure freely.
-
 ```python
-import time, threading
-from collections import deque
+import time
 from transformsai_ai_core import (
-    configure_logging, get_logger, process_config,
-    VideoCaptureAsync, MediaMTXStreamer, ApiClient, YOLOWrapper,
-    mat_to_response, time_to_string,
+    ApiClient, MediaMTXStreamer, VideoCaptureAsync, YOLOWrapper, configure_logging, get_logger,
 )
+from transformsai_ai_core.config import load_config
 
-configure_logging()
+config, report = load_config("config.yaml")
+configure_logging(config.logging, secrets=config.secrets())
 logger = get_logger(__name__)
+for issue in report.warnings:
+    logger.warning(f"config: {issue}")
 
-def io_worker(s):
-    last = time.time()
+models = {name: YOLOWrapper.from_config(m) for name, m in config.models.items()}
+client = ApiClient.from_config(config.api) if config.api and config.api.enabled else None
+
+pipelines = []
+for name, camera in config.cameras.items():
+    cap = VideoCaptureAsync.from_camera(camera).start()
+    streamer = None
+    if camera.stream and camera.stream.enabled:
+        streamer = MediaMTXStreamer.from_camera(camera, config.mediamtx, config.node)
+        streamer.start_streaming()
+    pipelines.append((name, cap, streamer))
+
+try:
     while True:
-        ok, frame = s["cap"].read(copy=True)
-        if not ok:
-            time.sleep(0.1); continue
-        if s["streamer"]:
-            s["streamer"].update_frame(frame)            # TODO: draw overlays first
-        if time.time() - last >= s["interval"]:
-            with s["lock"]:
-                if len(s["buf"]) >= s["buf"].maxlen:
-                    s["buf"].popleft()
-                s["buf"].append(frame.copy())
-            last = time.time()
+        for name, cap, streamer in pipelines:
+            ok, frame = cap.read(timeout=0.5)
+            if not ok:
+                continue
+            if streamer:
+                streamer.update_frame(frame)
+            # TODO: inference with models[...], uploads with client.post(...)
         time.sleep(0.01)
-
-def main():
-    cfg     = process_config("config.yaml", resolve_models=True)
-    timings = cfg["advanced"]["timings"]
-    api_cfg = cfg["advanced"]["api"]
-    ls_cfg  = cfg["advanced"]["livestream"]
-
-    models = {n: YOLOWrapper(m) for n, m in cfg["advanced"]["models"].items() if m.get("path")}
-    client = ApiClient.from_config(api_cfg) if api_cfg.get("enabled") else None
-
-    streams = []
-    for i, cam in enumerate(cfg["cameras"]):
-        cam_id   = f"cam_{i}"
-        streamer = None
-        if ls_cfg.get("enabled"):
-            streamer = MediaMTXStreamer.from_config(ls_cfg, camera_sn_id=cam_id)
-            streamer.start_streaming()
-        s = {
-            "id": cam_id,
-            "cap": VideoCaptureAsync.from_config(cam).start(),
-            "streamer": streamer,
-            "buf": deque(maxlen=timings.get("frame_buffer_size", 1)),
-            "lock": threading.Lock(),
-            "interval": timings.get("frame_collect_interval", 3.0),
-            "last_inf": 0,
-        }
-        streams.append(s)
-        threading.Thread(target=io_worker, args=(s,), daemon=True).start()
-
-    last_hb = time.time()
-    try:
-        while True:
-            now = time.time()
-            for s in streams:
-                if now - s["last_inf"] >= timings.get("inference_interval", 5.0):
-                    with s["lock"]:
-                        frames = list(s["buf"])
-                    for model in models.values():
-                        if frames:
-                            results = model.predict(frames, conf=0.5)
-                            # TODO: process results, upload via client.post(...)
-                    s["last_inf"] = now
-            if client and now - last_hb >= timings.get("heartbeat_interval", 60):
-                for s in streams:
-                    client.post("heartbeat", json={"sn": s["id"], "ts": time_to_string(now)}, cache=False)
-                last_hb = now
-            time.sleep(0.1)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        for s in streams:
-            s["cap"].stop(); s["cap"].release()
-            if s["streamer"]:
-                s["streamer"].stop_streaming()
-        if client:
-            client.shutdown()
-
-if __name__ == "__main__":
-    main()
+finally:
+    for _, cap, streamer in pipelines:
+        cap.release()
+        if streamer:
+            streamer.stop_streaming()
+    if client:
+        client.shutdown()
 ```
 
 ---
@@ -524,14 +380,18 @@ if __name__ == "__main__":
 ## CLI
 
 ```bash
-uv run transformsaicore download models --config config.yaml   # currently the only subcommand
+uv run transformsaicore config validate config.yaml          # strict gate: exit 1 on errors
+uv run transformsaicore config validate --lenient config.yaml
+uv run transformsaicore config example -o config.example.yaml
+uv run transformsaicore config schema > config.schema.json   # JSON Schema for editors
+uv run transformsaicore download models --config config.yaml [--base-url URL]
 ```
 
 ## Tests
 
-Mixed `unittest` + `pytest` (pytest is not a declared dep). Examples:
+Mixed `unittest` + `pytest` (pytest is not a declared dep):
 ```bash
-uv run python -m unittest tests.test_logger
-uv run python tests/test_config_manager.py
-uv run --with pytest pytest tests/test_datasend.py
+uv run --frozen --with pytest pytest tests/ --ignore tests/test_yolo_wrapper.py
+uv run --frozen python -m unittest tests.test_config_schema
+uv run --frozen python tests/test_yolo_wrapper.py   # downloads ultralytics models
 ```

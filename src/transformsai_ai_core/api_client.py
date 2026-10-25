@@ -7,7 +7,7 @@ import shutil
 import threading
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import requests
@@ -99,8 +99,8 @@ class _DirCache:
 
     SCHEMA = 1
 
-    def __init__(self, cache_dir: str, max_cache_items: int, max_cache_age_seconds: int,
-                 max_cache_retries: int, logger):
+    def __init__(self, cache_dir: str, max_cache_items: Optional[int], max_cache_age_seconds: Optional[float],
+                 max_cache_retries: Optional[int], logger):
         self.cache_dir = cache_dir
         self.max_cache_items = max_cache_items
         self.max_cache_age_seconds = max_cache_age_seconds
@@ -291,7 +291,7 @@ class _DirCache:
 
     def retry_count(self, fid: str) -> int:
         meta = self._read_meta(fid)
-        return int(meta.get("retry_count", 0)) if meta else self.max_cache_retries
+        return int(meta.get("retry_count", 0)) if meta else (self.max_cache_retries or 0)
 
     def is_persistent(self, fid: str) -> bool:
         """Non-expiring entries ignore the age and retry-count limits."""
@@ -316,9 +316,18 @@ class _DirCache:
             self._enforce_limits()
             out = []
             for fid in list(self._ids):
-                if self.is_persistent(fid) or self.retry_count(fid) < self.max_cache_retries:
+                if self.is_persistent(fid) or not self.retries_exhausted(fid):
                     out.append(fid)
             return out
+
+    def retries_exhausted(self, fid: str) -> bool:
+        """True once a transient entry used up max_cache_retries (None = never)."""
+        meta = self._read_meta(fid)
+        if meta is None:
+            return True  # unreadable entry: nothing left to retry
+        if self.max_cache_retries is None:
+            return False
+        return int(meta.get("retry_count", 0)) >= self.max_cache_retries
 
     def list(self) -> List[dict]:
         """Lightweight metadata for every cached request (no file bytes read)."""
@@ -355,14 +364,14 @@ class _DirCache:
         ``max_cache_items`` — that cap is a disk-safety backstop, not an expiry
         policy — though transient entries are always sacrificed first.
         """
-        if self.max_cache_age_seconds > 0:
+        if self.max_cache_age_seconds and self.max_cache_age_seconds > 0:
             now = time.time()
             for fid in [f for f in self._ids if not self.is_persistent(f)]:
                 created = self._folder_epoch(fid)
                 if created is not None and now - created > self.max_cache_age_seconds:
                     self.logger.debug(f"Dropping aged-out cached request {fid}")
                     self._remove_nolock(fid)
-        if self.max_cache_items > 0 and len(self._ids) > self.max_cache_items:
+        if self.max_cache_items and self.max_cache_items > 0 and len(self._ids) > self.max_cache_items:
             excess = len(self._ids) - self.max_cache_items
             persistent = [f for f in self._ids if self.is_persistent(f)]
             victims = [f for f in self._ids if f not in persistent] + persistent  # _ids sorted -> oldest first
@@ -402,9 +411,9 @@ class ApiClient:
         cache_enabled: bool = True,
         cache_dir: str = ".core-api-cache",
         cache_retry_interval: int = 100,
-        max_cache_items: int = 300,
-        max_cache_age_seconds: int = 86400,
-        max_cache_retries: int = 5,
+        max_cache_items: Optional[int] = 300,
+        max_cache_age_seconds: Optional[float] = 86400,
+        max_cache_retries: Optional[int] = 5,
         endpoints: Optional[Dict[str, Any]] = None,
         pool_connections: int = 10,
         pool_maxsize: int = 10,
@@ -831,28 +840,48 @@ class ApiClient:
                 self.logger.info(f"Cache retry succeeded: {fid}")
                 self.cache.remove(fid)
             elif (not self.cache.is_persistent(fid)
-                  and self.cache.retry_count(fid) >= self.cache.max_cache_retries):
+                  and self.cache.retries_exhausted(fid)):
                 self.logger.warning(f"Max retries exceeded for {fid}, dropping")
                 self.cache.remove(fid)
 
     # ------------------------------------------------------------------ from_config
     @classmethod
-    def from_config(cls, cfg, **overrides):
-        from .config_loader import init_kwargs
-        if hasattr(cfg, "model_dump"):
-            cfg = cfg.model_dump()
-        else:
-            cfg = dict(cfg)
-        endpoints = cfg.pop("endpoints", {}) or {}
+    def from_config(cls, api, **overrides) -> "ApiClient":
+        """Build a client from a typed ``ApiConfig`` (``config.api``); `overrides` win.
+
+        ``api.enabled`` is the caller's to check; endpoints are registered by name.
+        """
         kwargs: dict[str, Any] = {
-            k: v for k, v in cfg.items()
-            if k != "enabled"
+            "base_url": api.base_url,
+            "headers": dict(api.headers),
+            "timeout": api.timeout,
+            "success_codes": tuple(api.success_codes),
+            "default_content_type": api.content_type,
+            "auth_keys": list(api.auth_keys),
+            "auth_header": api.auth_header,
+            "max_retries": api.retries.max,
+            "retry_backoff": api.retries.backoff,
+            "retry_backoff_max": api.retries.backoff_max,
+            "retry_on_status": tuple(api.retries.on_status),
+            "max_workers": api.pool.workers,
+            "cache_enabled": api.outbox.enabled,
+            "cache_dir": api.outbox.dir,
+            "cache_retry_interval": api.outbox.retry_interval,
+            "max_cache_items": api.outbox.max_items,
+            "max_cache_age_seconds": api.outbox.max_age,
+            "max_cache_retries": api.outbox.max_retries,
+            "pool_connections": api.pool.connections,
+            "pool_maxsize": api.pool.maxsize,
+            "endpoints": {
+                name: EndpointProfile(
+                    path=e.path, method=e.method, headers=e.headers, content_type=e.content_type,
+                    cache=e.cache, persist=e.persist,
+                )
+                for name, e in api.endpoints.items()
+            },
         }
-        kwargs = {**cfg.get("extras", {}), **kwargs, **overrides}
-        client = cls(**init_kwargs(cls, kwargs))
-        for name, profile in endpoints.items():
-            client.register_endpoint(name, profile)
-        return client
+        kwargs.update(overrides)
+        return cls(**kwargs)
 
     # ------------------------------------------------------------------ lifecycle
     def shutdown(self, wait: bool = True) -> None:

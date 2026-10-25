@@ -1,6 +1,4 @@
-import time
-import sys
-from transformsai_ai_core.central_logger import get_logger
+from transformsai_ai_core.central_logger import configure_logging, get_logger
 
 
 logger = get_logger()
@@ -9,15 +7,16 @@ logger.debug("only file")
 logger.trace("nowhere")
 
 
-logger = get_logger(cli_sink_level="TRACE", file_sink_level="INFO")
+configure_logging(console_level="TRACE", file_level="INFO", secrets=["hunter2-secret"])
 logger.info("Both")
 logger.debug("only stderr")
 logger.trace("only stderr")
 logger.error("error")
+logger.info("redacted: rtsp://admin:hunter2-secret@10.0.0.5/stream and hunter2-secret")
 
 try:
     raise ValueError("This is a test error")
-except ValueError as e:
+except ValueError:
     logger.error("An error occurred")
 
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`transformsai-ai-core` is an internal Python library (src layout, build backend `setuptools.build_meta`, `uv` for dependency management/running, Python pinned `>=3.10,<3.12`) providing thread-safe utilities for computer vision pipelines: video capture, YOLO inference, structured logging, data upload, RTSP streaming, and YAML config management. Build backend is `setuptools.build_meta`; Python is pinned `>=3.10,<3.12`.
+`transformsai-ai-core` is an internal Python library (src layout, build backend `setuptools.build_meta`, `uv` for dependency management/running, Python pinned `>=3.10,<3.12`) providing thread-safe utilities for computer vision pipelines: video capture, YOLO inference, structured logging with secret redaction, HTTP upload, RTSP streaming, and typed YAML config. It is shared by several edge projects — keep it general, never shaped around one project.
 
 ## Common Commands
 
@@ -17,16 +17,18 @@ uv sync --extra trt    # TensorRT GPU inference
 uv sync --extra rknn   # RKNN edge device inference
 uv sync --extra onnx   # ONNX Runtime GPU
 
-# Run tests
-uv run python tests/test_config_manager.py
-uv run python -m unittest tests.test_logger
-uv run python -m unittest tests.test_fps_crash
-uv run --with pytest pytest tests/test_datasend.py
+# Run tests (use --frozen so uv doesn't re-lock uv.lock)
+uv run --frozen --with pytest pytest tests/ --ignore tests/test_yolo_wrapper.py
+uv run --frozen python -m unittest tests.test_config_schema
+uv run --frozen python tests/test_yolo_wrapper.py   # script; downloads ultralytics models
 
 # Run a single unittest test
-uv run python -m unittest tests.test_logger.TestCentralLogger.test_basic_logging
+uv run --frozen python -m unittest tests.test_logger.TestCentralLogger.test_off_disables_a_sink
 
-# CLI entry point (download models is currently the only subcommand)
+# CLI
+uv run transformsaicore config validate config.yaml      # strict gate, exit 1 on errors
+uv run transformsaicore config example -o config.example.yaml   # regenerate after schema changes
+uv run transformsaicore config schema
 uv run transformsaicore download models --config config.yaml
 ```
 
@@ -34,29 +36,52 @@ uv run transformsaicore download models --config config.yaml
 
 All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses `__getattr__`-based lazy imports to defer heavy module loads (saves 50–100 MB RSS on edge devices).
 
-`mediamtx-host/` is not library code: it is the VPS deployment (docker compose + `mediamtx.yml` + demand-flag server) that pairs with `MediaMTXStreamer`'s `on_demand` mode. See [mediamtx-host/README.md](mediamtx-host/README.md).
+`mediamtx-host/` is not library code: it is the VPS deployment (docker compose + `mediamtx.yml` + demand-flag server) that pairs with `MediaMTXStreamer`'s `on_demand` mode. Its `mediamtx.yml` raises demand flags only for `live/cam_sn_*` paths (the validator warns about on-demand names without that prefix). See [mediamtx-host/README.md](mediamtx-host/README.md).
 
 ### Core Modules
 
-**`central_logger.py`** — Loguru-based structured logger.
-- Output: JSON Lines at `.core-logs/{YYYY-MM-DD}/{HH-MM-SS}_{run_id}.jsonl`
-- API: `get_logger(name=None, cli_sink_level="INFO", file_sink_level="DEBUG")` — returns a `_LoggerWrapper`
-- Console level is set via `cli_sink_level`, configured on first call (levels honored when called from the entry script or before first configuration)
-- `cli_debug` and `module_name` params still exist but are **DEPRECATED**
+**`central_logger.py`** + **`redact.py`** — Loguru-based structured logger with secret redaction.
+- Output: JSON Lines at `.core-logs/{YYYY-MM-DD}/{run_id}_{HH-MM-SS-ffffff}.jsonl` + a console sink
+- API: `configure_logging(config=None, *, console_level=, file_level=, secrets=())`, `get_logger(name=None)` → `_LoggerWrapper`
+- `configure_logging` only removes the sink ids it added itself (`_core_sink_ids`) — project sinks added
+  after it survive later calls. `OFF`/None = no sink. Levels are set only via `configure_logging`
+- Core owns the one global loguru patcher (`_patch`): redacts message + string `extra` values via
+  `redact.redact()` (URL userinfo, auth headers, Bearer tokens, `add_secret()` literals + URL-encoded form);
+  projects chain with `add_patcher()`, never `logger.configure(patcher=)`. Core sinks also redact
+  rendered tracebacks and use `diagnose=False`; `redacting_sink()` wraps project sinks
 - `.error()` automatically captures current exception traceback
 - Auto-rotation at 10 MB; run ID is 6 chars, auto-generated per process
 
-**`config_schema.py` + `config_loader.py`** — Pydantic-validated YAML config system.
-- Root schema: `AppConfig` → `MetaConfig`, `CameraConfig[]`, `AdvancedConfig`
-- `AdvancedConfig` contains `ModelConfig`, `ApiConfig` (unified, replaces legacy `DatasendConfig`), `LivestreamConfig` plus arbitrary freeform dicts
-- Key distinction: *formatted* (strict Pydantic) vs *freeform* (dict[str, Any]) sections — don't add Pydantic validation to intentionally freeform fields
-- Every strict (formatted) section has an `extras: dict[str, Any]` field — a sanctioned freeform channel so the loader never drops data we haven't modeled yet
-- Main entry point: `process_config(path, base_dir, resolve_models, download_models)`
-- `build_rtsp_url(rtsp_source)` constructs authenticated RTSP URLs
-- `init_kwargs(cls, data)` filters a dict to names accepted by `cls.__init__`, used by `from_config` to drop control/freeform keys (`enabled`, `settings`, `extras` leftovers)
+**`config/`** — the 5.0 config system (pydantic + PyYAML + stdlib only; no cv2/torch imports).
+- `schema.py`: typed models for core sections only — `Config` root → `NodeConfig` (`sn` required),
+  `cameras: dict[str, CameraConfig]` (a list is normalised to `camera_0…`), `MediaMTXConfig | None`,
+  `ApiConfig | None`, `models: dict[str, ModelConfig]`, `LoggingConfig`, free `settings`.
+  `CameraConfig.source` is a discriminated union on `type` (`RtspSource`/`DeviceSource`/`FileSource`/
+  `UrlSource`; add a type = one class + `SOURCE_TYPES`/`Source` entry). Per-camera `capture`, optional
+  `stream` (with optional `audio`). **Defaults live only here**; components map these models onto
+  constructors (a drift test in `tests/test_stream_config.py` keeps constructor defaults equal)
+- `CoreModel`: `extra="allow"` (unknown keys kept + reported, never dropped), `validate_default=True`,
+  `coerce_numbers_to_str=True`, null → `{}`. Every core object has a free `settings: dict[str, Any]`
+- `types.py`: `Duration`/`DurationOrOff` (`"500ms"`, `"3s"`, `"2m"`, `"1h"`), `Bitrate` (int bit/s,
+  dumps as `"800k"`), `Port`, `secret_field()` (marks secrets for `secrets()`/`masked_dump()`).
+  Only physical constraints — **never policy ranges**
+- `validate.py`: the engine. Unknown keys (walks raw data against the models; difflib suggestion +
+  `MIGRATION_HINTS` for 4.x keys): strict → error, lenient → warning. Invalid optional value: strict →
+  error, lenient → warning + key pruned so its default applies. Required problems → error, enclosing
+  camera/model/optional block pruned (or a placeholder filled) so the rest is still reported in one pass.
+  Then cross-field checks, then project validators (`registry.py`)
+- `loader.py`: `load_config(src, strict=False, base_dir=None) -> (Config, ValidationReport)` raises
+  `ConfigError(report)` iff errors; `validate_config(src)` strict/no side effects; `save_config` refuses
+  invalid configs, writes `exclude_unset`; `download_models` (explicit `path` always wins)
+- `urls.py`: `build_stream_urls()` — the only place stream URLs are built (shared by `Config.stream_urls`
+  and `MediaMTXStreamer`). Stream name template `{sn} {camera} {index}`, default `cam_sn_{sn}_{camera}`
+- `example.py`: `generate_example()` → the committed `config.example.yaml` (a test keeps it fresh)
+- Derived values are properties, never written into the config: `source.url`, `config.stream_urls()`,
+  `model.resolved_path`. `Config.secrets()`, `Config.masked_dump()`, `Config.schema_json()`
 
 **`video_capture.py`** — `VideoCaptureAsync` background-thread capture.
-- Auto-detects source (USB index, RTSP URL, local file)
+- Auto-detects source (USB index, RTSP URL, local file) unless a `source_type` hint
+  (`device`/`file`/`network`) is given — `from_camera` always passes one
 - Key params: `auto_restart_on_fail`, `restart_delay`, `max_frame_age_ms`, `hw_decode`
 - Usage: `.start()` → `.read()` in loop → `.stop()`
 - **Supervised reconnect, on by default** (`auto_restart_on_fail=True`). Failed open, a
@@ -73,35 +98,40 @@ All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses
 - The capture thread **owns the handle** and always releases it; `release()` abandons a
   thread wedged in OpenCV instead of double-releasing (the old code could segfault here)
 - Health: `.state`, `.is_healthy`, `.get_stats()`, `on_state_change(state, stats)` callback,
-  plus a `health_log_interval` line (DEBUG when healthy, INFO when degraded)
+  plus a `health_log_interval` line — INFO even when healthy, on purpose: it is the
+  once-a-minute liveness beacon node watchdogs rely on (degraded lines add `last_error`)
 - `read()` blocks up to `timeout` while down (no busy-spin), returns instantly after `stop()`
-- Config: nested `capture.restart:` block; legacy flat `auto_restart_on_fail`/`restart_delay`
-  still honored. Precedence: **overrides > `restart.*` > legacy flat > constructor defaults**
-- **Optional OSD timestamp overwrite** (`timestamp_overlay`, off by default): when enabled the
-  capture thread stamps current system time over the camera's on-screen timestamp on every
-  published frame (Hikvision clocks drift), so all consumers inherit the corrected time from one
-  overlay. Reuses `utils.hide_camera_timestamp_and_add_current_time`; fail-open (a bad options
-  dict logs once and publishes the un-stamped frame). Config: nested `capture.timestamp:` block
-  (`enabled`, `rect_ratios`/`rect_coords`, `hide_color`, `font_color`, `font_scale`, `time_format`)
+- Config: `VideoCaptureAsync.from_camera(camera, **overrides)` — source from `camera.source`
+  (`target`, `kind` → `source_type` hint, `transport`, file `loop`), the rest from `capture` /
+  `capture.restart`. Overrides win
+- **`frame_hook`** (`Callable[[ndarray], ndarray | None]`): runs on the capture thread on every
+  published frame (in `_publish_frame`); exceptions are caught, counted (`get_stats()["hook_errors"]`),
+  logged first-then-rate-limited, and the unhooked frame is published — a hook can never kill capture.
+  Project overlays (e.g. `utils.hide_camera_timestamp_and_add_current_time`) go here; core has no
+  timestamp config
+- Logs, `RuntimeError`s and `get_stats()["src"]` use `self._label` (password masked); `self.src` is real
 
-**`api_client.py`** — `ApiClient` generic, pooled HTTP client (the v4 client; prefer for new code).
+**`api_client.py`** — `ApiClient` generic, pooled HTTP client.
 - `Response`/`EndpointProfile`/`ApiClient`; backed by one pooled `requests.Session` (keep-alive, `max_retries=0` so urllib3 doesn't double-retry)
 - No transformsai-specific formatting and no special heartbeat path — a heartbeat is just `post(..., cache=False)`
 - Generic `request(method, path, *, json/data/params/files/..., async_=False)` + `get/post/put/patch/delete`; any verb works
 - `register_endpoint(name, profile)` (string or dict) + `send(name, ...)`; precedence per-call arg > profile > client default
 - Returns a frozen `Response` (`status_code/text/.json()/ok/attempts/...`); total failure → `Response(status_code=0, ok=False)`, never raises
 - Directory-per-request cache (`cache_dir/`, one folder per pending request — atomic, corruption-tolerant, O(1)); auto-retry policy: caches failed writes only, never GET/HEAD/OPTIONS
+- `from_config(api: ApiConfig, **overrides)` maps `retries.*` → `max_retries`/`retry_*`, `outbox.*` →
+  `cache_*`/`max_cache_*`, `pool.*` → `pool_*`/`max_workers`; outbox limits accept `None` = unbounded
 - `persist=True` (on `request`/`send`/verb methods, or an endpoint profile's `persist` key) marks a cache entry **non-expiring**: cached and retried exactly like any other failed write, and removed on success, but immune to `max_cache_age_seconds` and `max_cache_retries`. `max_cache_items` still applies (transient entries evicted first). `list_cached()` / `remove_cached(fid)` inspect and hand-drop cached requests
 
-**`datasend.py`** — `DataUploader` async HTTP client (**legacy**, still available; `ApiClient` supersedes it).
-- Non-blocking by default; thread pool auto-tuned to `min(2, cpu_count)`
-- Failed uploads are cached and retried with exponential backoff (up to `max_cache_items=300`, TTL 24h)
-- `send_data()` is async (fire-and-forget); `send_data_sync()` blocks for response
-- Heartbeats skip the cache — they are not retried on failure
-
-**`mediamtx_streamer.py`** — `MediaMTXStreamer` pushes frames to MediaMTX via FFmpeg.
-- Queue-based async frame updates; generates RTSP + WebRTC URLs
-- Supports hardware encoding (`hw_encode=True` auto-detects GPU encoder)
+**`mediamtx_streamer.py`** — `MediaMTXStreamer` pushes one camera's frames to MediaMTX via FFmpeg.
+- `from_camera(camera, server: MediaMTXConfig, node: NodeConfig, **overrides)`; constructor is
+  `(host, rtsp_port, stream_name, ...)` — `stream_name` is the full path name
+- Size/fps: `stream.*` > `capture.*`; unknown size → adopted from the first `update_frame` frame
+  (FFmpeg start deferred, `_start_pending`); fps fallback `StreamConfig.DEFAULT_FPS` (15)
+- `encoder_codec`: `libx264` | `auto` (detect hardware) | an FFmpeg encoder name
+- `build_audio_filter()` (module-level, pure): pan (alsa) → highpass (≤20 Hz single stage, >20 Hz two
+  cascaded `poles=2` stages) → volume → alimiter → aresample. Unset filter keys use
+  `AlsaAudioInput`/`CameraAudioInput.filter_defaults` (4.x behaviour). Golden-argv tests in
+  `tests/test_mediamtx_audio_fallback.py` guard every FFmpeg flag — keep its field-measured comments
 - **Audio is best-effort, video is not.** If FFmpeg dies at the start check with the audio
   input (ALSA `audio_device` or camera `audio_url`), the same start call relaunches
   video-only (argv identical to a no-audio node; the 5 s rapid-restart guard is not hit).
@@ -115,155 +145,39 @@ All production code is under `src/transformsai_ai_core/`. The `__init__.py` uses
   Read-only `audio_active` / `audio_error` (credentials scrubbed), also in `get_stats()`
 
 **`yolo_wrapper.py`** — `YOLOWrapper` / `YOLOEWrapper` around Ultralytics.
+- `from_config(model: ModelConfig, **overrides)` → model dict `{path: resolved_path, task, batch, export,
+  export_options, set_classes}`
 - Auto-exports to ONNX/TensorRT/RKNN when `export=True` in model dict
 - TensorRT is excluded on `aarch64` at the **dependency level** (`pyproject.toml`: `tensorrt-cu12 ...; platform_machine != 'aarch64'`), not by branch logic in `yolo_wrapper.py`
 - `YOLOEWrapper` supports text and visual prompts
 
-**`utils.py`** — `time_to_string()`, `mat_to_response()` (JPEG encode + optional timestamp overlay), plus visualization helpers: `resize_frame()`, `draw_boxes()`, `draw_common_elements()`, `hide_camera_timestamp_and_add_current_time()`, `get_legend_layout()`
+**`utils.py`** — `time_to_string()`, `mat_to_response()` (JPEG encode + optional timestamp overlay), plus config-free visualization helpers: `resize_frame()`, `draw_boxes()`, `draw_common_elements()`, `hide_camera_timestamp_and_add_current_time()` (badge caption via `corner_kicker`), `get_legend_layout()`
 
 ## Testing
 
-Tests are a **mix** of `unittest` ([test_logger.py](tests/test_logger.py), [test_fps_crash.py](tests/test_fps_crash.py), functional [test_config_manager.py](tests/test_config_manager.py)) and `pytest` ([test_datasend.py](tests/test_datasend.py)). Additional test files: [test_yolo_wrapper.py](tests/test_yolo_wrapper.py), [test_cli_debug.py](tests/test_cli_debug.py). Test fixtures are in `tests/` (`test-config-1.yaml`, `test-config-2.yaml`, `test.png`). Tests clean up after themselves (reset loggers, remove `.core-logs/`). Note: pytest is **not** a declared dependency, so run with `uv run --with pytest pytest tests/test_datasend.py`.
+Tests are a **mix** of `unittest` classes and script-style files; run them with pytest:
+`uv run --frozen --with pytest pytest tests/ --ignore tests/test_yolo_wrapper.py` (pytest is **not** a
+declared dependency). `test_yolo_wrapper.py` is a script that downloads ultralytics models. Config
+tests: [test_config_schema.py](tests/test_config_schema.py), [test_stream_config.py](tests/test_stream_config.py)
+(incl. the constructor-default drift test), [test_from_config.py](tests/test_from_config.py) (ApiClient,
+YOLO mapping, CLI). [test_config_schema.py](tests/test_config_schema.py) fails if `config.example.yaml`
+is stale — regenerate with `uv run transformsaicore config example -o config.example.yaml`. Tests clean
+up after themselves (reset loggers, remove `.core-logs/`, call `clear_registry()`).
 
-## Configuration YAML Structure
+## Configuration
 
-```yaml
-meta:
-  name: "project-name"   # required
-  version: "1.0.0"
-  token: ""
-  extras: {}           # sanctioned freeform channel
-
-cameras:
-  - local: false
-    local_source: ""
-    rtsp_source:
-      username: admin
-      password: ""
-      ip: 192.168.1.100
-      port: 554
-      path: /Streaming/Channels/101
-      extras: {}
-    capture:            # mirrors VideoCaptureAsync.__init__
-      buffer_size: 1
-      opencv_backend: auto
-      max_frame_age_ms: null
-      width: null
-      height: null
-      driver: null
-      auto_resize: true
-      hw_decode: false
-      fps: null
-      open_timeout: 5.0
-      rtsp_transport: tcp     # 'tcp'|'udp'|null — rtsp:// sources only
-      ffmpeg_options: null
-      health_log_interval: 60.0
-      restart:
-        enabled: null         # null → legacy auto_restart_on_fail → true
-        delay: null           # backoff ceiling; null → legacy restart_delay → 30.0
-        backoff_start: 1.0
-        backoff_jitter: 0.2
-        reset_after: 30.0
-        max_attempts: null    # null = forever
-        stall_timeout: null   # null = auto max(5, 20/fps); 0 = off
-        extras: {}
-      timestamp:              # overwrite camera OSD timestamp with current system time
-        enabled: false        # stamps every published frame when true
-        rect_ratios: null     # (x,y,w,h) ratios; null = top-left OSD default
-        rect_coords: null     # (x,y,w,h) pixels; overrides rect_ratios
-        hide_color: null      # BGR hide rect; null = white
-        font_color: null      # BGR text; null = black
-        font_scale: null      # null = auto from rect height
-        time_format: null     # strftime; null = '%Y-%m-%d %H:%M:%S'
-        extras: {}
-      auto_restart_on_fail: null  # LEGACY → restart.enabled
-      restart_delay: null         # LEGACY → restart.delay
-      extras: {}
-    settings: {}        # freeform per-camera
-    extras: {}
-
-advanced:
-  models:
-    yolo11n:
-      type: "person-det"   # required
-      download_key: ""
-      batch: 1
-      path: ""
-      export: false
-      load_options:
-        lib_type: YOLO
-        task: detect       # detect|classify|segment
-        extras: {}
-      export_options: {}
-      extras: {}
-  timings: {}      # freeform
-  api:              # Unified ApiClient config (replaces legacy datasend)
-    enabled: true
-    base_url: ""
-    headers: {}
-    timeout: 30
-    success_codes: [200, 201, 202, 204]
-    default_content_type: auto
-    auth_keys: []
-    auth_header: X-Secret-Key
-    max_retries: 3
-    retry_backoff: 1.0
-    retry_backoff_max: 30
-    retry_on_status: [408, 429, 500, 502, 503, 504]
-    max_workers: null
-    cache_enabled: true
-    cache_dir: .core-api-cache
-    cache_retry_interval: 100
-    max_cache_items: 300
-    max_cache_age_seconds: 86400
-    max_cache_retries: 5
-    endpoints: {}  # freeform — auto-registered by from_config
-    pool_connections: 10
-    pool_maxsize: 10
-    settings: {}   # freeform
-    extras: {}
-  livestream:       # mirrors MediaMTXStreamer.__init__
-    enabled: true
-    mediamtx_ip: localhost
-    rtsp_port: 8554
-    camera_sn_id: ""     # config default, overridable per camera
-    fps: 30
-    frame_width: 1920
-    frame_height: 1080
-    bitrate: "1500k"
-    hw_encode: false
-    debug_log_interval: 60.0
-    on_demand: false     # true = push only while a viewer is watching (edge polls a VPS demand flag)
-    demand_url: ""       # blank = derive https://{mediamtx_ip}/demand/cam_sn_{camera_sn_id}
-    demand_poll_interval: 3.0
-    demand_grace_period: 10.0
-    demand_timeout: 5.0
-    encoder:
-      preset: ultrafast
-      codec: copy
-      queue_size: 2
-      extras: {}
-    settings: {}   # freeform (NOT consumed by from_config)
-    extras: {}
-  pipeline: {}     # freeform project-specific
-```
-
-## Config-Driven Construction (from_config)
-
-Every runtime class now has a `from_config(cls, cfg, **overrides)` classmethod that
-constructs the object directly from a config section. Precedence: **overrides > typed
-fields > `extras`**.
+The authoritative, commented reference is [config.example.yaml](config.example.yaml) (generated from
+the schema). Migration from 4.x: [MIGRATION-5.0.md](MIGRATION-5.0.md). Principles the schema follows:
+validate only what core reads; lenient conversion, physical constraints only; require only what's
+strictly necessary; every core object has a free `settings: {}`; project features (overlays, GPIO,
+flash, insets) are never core schema; each fact lives in one place (serial = `node.sn`; streams derive
+size/fps from their camera); unknown keys are reported, never dropped.
 
 ```python
-# ApiClient — near 1:1 mapping, endpoints auto-registered
-client = ApiClient.from_config(cfg["advanced"]["api"], base_url="https://override.example.com")
-
-# VideoCaptureAsync — derives src from camera config
-cap = VideoCaptureAsync.from_config(cfg["cameras"][0])
-
-# MediaMTXStreamer — flattens encoder nesting
-streamer = MediaMTXStreamer.from_config(cfg["advanced"]["livestream"], camera_sn_id="cam1")
-
-# YOLOWrapper / YOLOEWrapper — thin pass-through
-model = YOLOWrapper.from_config(cfg["advanced"]["models"]["yolo11n"])
+config, report = load_config("config.yaml")
+cap = VideoCaptureAsync.from_camera(config.cameras["surveillance"], frame_hook=hook)
+streamer = MediaMTXStreamer.from_camera(config.cameras["surveillance"], config.mediamtx, config.node)
+client = ApiClient.from_config(config.api)
+model = YOLOWrapper.from_config(config.models["person-det"])
+configure_logging(config.logging, secrets=config.secrets())
 ```

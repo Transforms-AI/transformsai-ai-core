@@ -101,7 +101,7 @@ _BADGE_CACHE = {}
 _BADGE_BG_RGBA = (15, 23, 42, 180)        # slate
 _BADGE_ACCENT_RGBA = (99, 102, 241, 230)  # indigo bar
 _BADGE_DOT_RGB = (74, 222, 128)           # live dot
-_BADGE_KICKER_RGB = (147, 197, 253)       # "AI SURVEILLANCE"
+_BADGE_KICKER_RGB = (147, 197, 253)       # the small caption above corner_label
 _FONT_DIR = "/usr/share/fonts/truetype/dejavu/"
 
 
@@ -159,7 +159,7 @@ def _blend_patch(frame, patch, x0, y0):
               + roi.astype(np.float32) * (1.0 - alpha)).astype(np.uint8)
 
 
-def _draw_badges_pil(frame, time_string, corner_label, margin_x, margin_y):
+def _draw_badges_pil(frame, time_string, corner_label, margin_x, margin_y, kicker="AI SURVEILLANCE"):
     fh, fw = frame.shape[:2]
     s = fh / 720.0
     key_t = ("time", time_string, fw, fh)
@@ -176,14 +176,15 @@ def _draw_badges_pil(frame, time_string, corner_label, margin_x, margin_y):
     _blend_patch(frame, patch_t, margin_x, margin_y)
 
     if corner_label:
-        key_l = ("loc", str(corner_label), fw, fh)
+        key_l = ("loc", str(corner_label), str(kicker or ""), fw, fh)
         patch_l = _BADGE_CACHE.get(key_l)
         if patch_l is None:
-            kicker = " ".join("AI SURVEILLANCE")
+            lines = []
+            if kicker:
+                lines.append((" ".join(str(kicker)), _badge_font(False, max(8, int(12 * s))), _BADGE_KICKER_RGB))
+            lines.append((str(corner_label), _badge_font(True, max(13, int(21 * s))), (255, 255, 255)))
             patch_l = _badge_patch(
-                [(kicker, _badge_font(False, max(8, int(12 * s))), _BADGE_KICKER_RGB),
-                 (str(corner_label), _badge_font(True, max(13, int(21 * s))),
-                  (255, 255, 255))],
+                lines,
                 pad_x=int(16 * s), pad_y=int(10 * s), gap=int(5 * s),
                 radius=max(4, int(10 * s)))
             _BADGE_CACHE[key_l] = patch_l
@@ -210,6 +211,7 @@ def hide_camera_timestamp_and_add_current_time(
     badge=True,
     badge_alpha=0.55,
     corner_label=None,
+    corner_kicker="AI SURVEILLANCE",
 ):
     """
     Hides a region on a frame (defined by pixel coordinates or ratios)
@@ -236,6 +238,11 @@ def hide_camera_timestamp_and_add_current_time(
                                   Default: False (backward compatible).
         time_format (str, optional): strftime format for the rendered timestamp.
                                      Default: "%Y-%m-%d %H:%M:%S".
+        badge (bool, optional): Draw styled badges instead of the hide-rectangle. Default: True.
+        badge_alpha (float, optional): Badge background opacity (cv2 fallback). Default: 0.55.
+        corner_label (str, optional): Text of a bottom-right badge (e.g. a location). Default: None.
+        corner_kicker (str, optional): Small caption above corner_label ("" = none).
+                                       Default: "AI SURVEILLANCE".
 
     Returns:
         np.ndarray: The modified frame.
@@ -270,7 +277,7 @@ def hide_camera_timestamp_and_add_current_time(
     if badge and _BADGE_CACHE.get("pil_broken") is not True:
         try:
             return _draw_badges_pil(output_frame, time_string, corner_label,
-                                    max(10, rect_x), max(10, rect_y))
+                                    max(10, rect_x), max(10, rect_y), kicker=corner_kicker)
         except Exception:  # noqa: BLE001 -- never let styling kill the capture thread
             _BADGE_CACHE["pil_broken"] = True
 

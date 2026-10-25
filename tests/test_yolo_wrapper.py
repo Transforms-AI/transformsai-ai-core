@@ -321,7 +321,7 @@ try:
     model = YOLOEWrapper(
         model_dict={
             "path": YOLOE_MODEL,
-            "load_options": {"task": "segment", "set_classes": ["person", "car", "bike"]},
+            "task": "segment", "set_classes": ["person", "car", "bike"],
             "export": False,
             "batch": 1
         }
@@ -340,7 +340,7 @@ try:
     model = YOLOEWrapper(
         model_dict={
             "path": YOLOE_MODEL,
-            "load_options": {"task": "segment", "set_classes": ["person", "car", "bike"]},
+            "task": "segment", "set_classes": ["person", "car", "bike"],
             "export": False,
             "batch": 1
         }
@@ -374,7 +374,7 @@ try:
     model = YOLOEWrapper(
         model_dict={
             "path": YOLOE_MODEL,
-            "load_options": {"task": "segment", "set_classes": ["person", "car", "bike"]},
+            "task": "segment", "set_classes": ["person", "car", "bike"],
             "export": False,
             "batch": 2
         }
@@ -405,7 +405,7 @@ try:
         model_dict={
             "path": YOLOE_MODEL,
             "export": True,
-            "load_options": {"task": "segment", "set_classes": ["person", "car", "bike"]},
+            "task": "segment", "set_classes": ["person", "car", "bike"],
             "export_options": {"format": "onnx", "imgsz": 640},
             "batch": 1
         }

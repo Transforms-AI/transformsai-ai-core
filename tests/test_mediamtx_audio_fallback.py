@@ -108,7 +108,7 @@ sys.exit(1)
 '''
 
 # Exact argv of 4.4.7 (recorded from the unmodified code by stubbing Popen),
-# for MediaMTXStreamer("vps.example.com", 8554, "testcam", fps=15,
+# for MediaMTXStreamer("vps.example.com", 8554, "cam_sn_testcam", fps=15,
 # frame_width=640, frame_height=480, bitrate="800k", **audio_kwargs).
 GOLDEN = {
     "none": [
@@ -159,7 +159,7 @@ GOLDEN = {
 GOLDEN_KWARGS = {
     "none": {},
     "alsa": dict(audio_device="inmp441"),
-    "rtsp": dict(audio_source="rtsp", audio_url="rtsp://cam.local/audio",
+    "rtsp": dict(audio_input="camera", audio_url="rtsp://cam.local/audio",
                  audio_gain_db=0),
 }
 
@@ -231,7 +231,7 @@ class FakeFFmpegTestCase(unittest.TestCase):
             return []
 
     def make(self, **kwargs):
-        s = MediaMTXStreamer("vps.example.com", 8554, "testcam", fps=15,
+        s = MediaMTXStreamer("vps.example.com", 8554, "cam_sn_testcam", fps=15,
                              frame_width=640, frame_height=480, bitrate="800k",
                              **kwargs)
         s._start_check_s = 0.3
@@ -254,7 +254,7 @@ class TestCommandLine(unittest.TestCase):
 
     def test_golden_argv_unchanged(self):
         for name, kwargs in GOLDEN_KWARGS.items():
-            s = MediaMTXStreamer("vps.example.com", 8554, "testcam", fps=15,
+            s = MediaMTXStreamer("vps.example.com", 8554, "cam_sn_testcam", fps=15,
                                  frame_width=640, frame_height=480,
                                  bitrate="800k", **kwargs)
             self.assertEqual(s._build_ffmpeg_cmd(s._audio_configured),
@@ -262,22 +262,48 @@ class TestCommandLine(unittest.TestCase):
             # The fallback stream is exactly a configured no-audio stream
             self.assertEqual(s._build_ffmpeg_cmd(False), GOLDEN["none"], name)
 
-    def test_from_config_without_audio_unchanged(self):
-        s = MediaMTXStreamer.from_config({
-            "mediamtx_ip": "vps.example.com", "fps": 15, "frame_width": 640,
-            "frame_height": 480, "bitrate": "800k",
-        }, camera_sn_id="testcam")
+    def test_from_camera_without_audio_unchanged(self):
+        from transformsai_ai_core.config import load_config
+        config, _ = load_config({
+            "node": {"sn": "testcam"},
+            "cameras": {"cam": {
+                "source": {"type": "rtsp", "host": "10.0.0.5"},
+                "capture": {"fps": 15, "width": 640, "height": 480},
+                "stream": {"name": "cam_sn_{sn}", "bitrate": "800k"},
+            }},
+            "mediamtx": {"host": "vps.example.com"},
+        })
+        s = MediaMTXStreamer.from_camera(config.cameras["cam"], config.mediamtx, config.node)
         self.assertFalse(s._audio_configured)
         self.assertEqual(s._build_ffmpeg_cmd(s._audio_configured), GOLDEN["none"])
         self.assertFalse(s.audio_active)
         self.assertIsNone(s.audio_error)
+
+    def test_from_camera_with_audio_reproduces_golden(self):
+        from transformsai_ai_core.config import load_config
+        base = {
+            "node": {"sn": "testcam"},
+            "mediamtx": {"host": "vps.example.com"},
+        }
+        camera = {
+            "capture": {"fps": 15, "width": 640, "height": 480},
+            "stream": {"name": "cam_sn_{sn}", "bitrate": "800k"},
+        }
+        alsa = {**camera, "source": {"type": "device", "index": 0},
+                "stream": {**camera["stream"], "audio": {"input": {"type": "alsa", "device": "inmp441"}}}}
+        cam = {**camera, "source": {"type": "url", "url": "rtsp://cam.local/audio"},
+               "stream": {**camera["stream"], "audio": {"input": {"type": "camera"}}}}
+        for name, cfg in (("alsa", alsa), ("rtsp", cam)):
+            config, _ = load_config({**base, "cameras": {"c": cfg}})
+            s = MediaMTXStreamer.from_camera(config.cameras["c"], config.mediamtx, config.node)
+            self.assertEqual(s._build_ffmpeg_cmd(True), GOLDEN[name], name)
 
 
 class TestAudioFailureLine(unittest.TestCase):
 
     def line(self, log, **kwargs):
         kwargs = kwargs or dict(audio_device="inmp441")
-        s = MediaMTXStreamer("vps.example.com", 8554, "testcam", **kwargs)
+        s = MediaMTXStreamer("vps.example.com", 8554, "cam_sn_testcam", **kwargs)
         return s._audio_failure_line(log)
 
     def test_ffmpeg9_alsa_open_failure(self):
@@ -289,7 +315,7 @@ class TestAudioFailureLine(unittest.TestCase):
     def test_ffmpeg9_rtsp_open_failure(self):
         log = ("[tcp @ 0x5652abb93600] Connection to tcp://127.0.0.1:2?timeout=20000000 failed: Connection refused\n"
                "[in#1 @ 0x5652abb90b40] Error opening input: Connection refused\n")
-        self.assertEqual(self.line(log, audio_source="rtsp", audio_url="rtsp://127.0.0.1:2/cam"),
+        self.assertEqual(self.line(log, audio_input="camera", audio_url="rtsp://127.0.0.1:2/cam"),
                          "Error opening input: Connection refused")
 
     def test_older_ffmpeg_formats(self):
@@ -300,10 +326,10 @@ class TestAudioFailureLine(unittest.TestCase):
             audio_device="dsnoop_mic"))
         self.assertIsNotNone(self.line(
             "rtsp://cam.local/audio: Connection timed out\n",
-            audio_source="rtsp", audio_url="rtsp://cam.local/audio"))
+            audio_input="camera", audio_url="rtsp://cam.local/audio"))
 
     def test_audio_error_never_carries_credentials(self):
-        s = MediaMTXStreamer("vps.example.com", 8554, "testcam", audio_source="rtsp",
+        s = MediaMTXStreamer("vps.example.com", 8554, "cam_sn_testcam", audio_input="camera",
                              audio_url="rtsp://admin:s3cret@cam.local/audio")
         s.logger = RecordingLogger()
         s._note_audio_failure(s._audio_failure_line(
@@ -317,7 +343,7 @@ class TestAudioFailureLine(unittest.TestCase):
                "[out#0/rtsp @ 0x55c8e1250a00] Could not write header (incorrect codec parameters ?): Connection refused\n"
                "[vf#0:0 @ 0x55c8e1254700] Error sending frames to consumers: Connection refused\n")
         self.assertIsNone(self.line(log))
-        self.assertIsNone(self.line(log, audio_source="rtsp", audio_url="rtsp://cam.local/audio"))
+        self.assertIsNone(self.line(log, audio_input="camera", audio_url="rtsp://cam.local/audio"))
 
 
 class TestStartFallback(FakeFFmpegTestCase):
@@ -344,7 +370,7 @@ class TestStartFallback(FakeFFmpegTestCase):
 
     def test_unreachable_rtsp_audio_falls_back_to_video_only(self):
         self.control("audio_fail", "always")
-        s = self.make(audio_source="rtsp", audio_url="rtsp://127.0.0.1:2/cam")
+        s = self.make(audio_input="camera", audio_url="rtsp://127.0.0.1:2/cam")
         self.assert_video_only_fallback(s, "Connection refused")
 
     def test_audio_retried_after_backoff_and_heals(self):

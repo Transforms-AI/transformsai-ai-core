@@ -169,20 +169,31 @@ enable RTMP/HLS/SRT in `mediamtx.yml`.)
 ### 8. Configure the edges
 
 ```yaml
-advanced:
-  livestream:
-    mediamtx_ip: mediamtx.transformsai.com   # demand URL derives from this
-    on_demand: true
-    # optional overrides (defaults shown):
-    # demand_poll_interval: 3.0
-    # demand_grace_period: 10.0   # keep >= 5s (streamer's rapid-restart guard)
-    # demand_timeout: 5.0
-    # demand_url: ""
+mediamtx:
+  host: mediamtx.transformsai.com   # demand URL derives from this
+  # optional overrides (defaults shown):
+  # demand:
+  #   poll_interval: 3
+  #   grace_period: 10   # keep >= 5s (streamer's rapid-restart guard)
+  #   timeout: 5
+  # demand_url: null     # template; null = https://{host}/demand/{name}
+
+cameras:
+  surveillance:
+    source: {type: rtsp, host: 192.168.1.64, user: admin, password: "..."}
+    stream:
+      on_demand: true
+      # name: "cam_sn_{sn}_{camera}"   # the default
 ```
 
 `on_demand: false` (the default) keeps always-on behavior; nothing else
 changes. Viewers watch at
-`https://mediamtx.transformsai.com/live/cam_sn_<id>/`.
+`https://mediamtx.transformsai.com/live/<stream name>/`.
+
+Stream names must start with `cam_sn_` for on-demand to work: `mediamtx.yml`
+only raises demand flags for `live/cam_sn_*` paths (core's default
+`cam_sn_{sn}_{camera}` does; `transformsaicore config validate` warns when an
+on-demand name doesn't).
 
 ### 9. Verify
 
